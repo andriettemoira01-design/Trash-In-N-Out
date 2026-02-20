@@ -1,0 +1,16 @@
+/* Map container styles to handle touch events properly */
+.map-container {
+  touch-action: pan-x pan-y;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Ensure the map element handles touch correctly */
+.map-container > div {
+  touch-action: none;
+}
+
+/* Prevent text selection while interacting with the map */
+.map-container * {
+  -webkit-user-select: none;
+  user-select: none;
+}
