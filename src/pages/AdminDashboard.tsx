@@ -164,6 +164,14 @@ const IconTime: React.FC<{ className?: string }> = ({ className }) => (
   </svg>
 )
 
+const IconGift: React.FC<{ className?: string }> = ({ className }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" className={className} fill="currentColor">
+    <path d="M346 110a34 34 0 00-68 0v34h34a34 34 0 0034-34zM234 110a34 34 0 10-34 34h34z"/>
+    <path d="M234 144h44v112H120v-92a20 20 0 0120-20h94zM278 256h114v-92a20 20 0 00-20-20h-94z"/>
+    <path d="M480 320v112a64 64 0 01-64 64H278V320zM234 320v176H96a64 64 0 01-64-64V320z"/>
+  </svg>
+)
+
 // Interface definitions
 interface DashboardStats {
   totalUsers: number
@@ -209,6 +217,7 @@ interface MaterialRequest {
   status: string
   createdAt: any
   updatedAt: any
+  fulfillmentMethod?: string
   location: {
     latitude: number
     longitude: string
@@ -227,6 +236,27 @@ interface Transaction {
   total: number
   status: string
   createdAt: any
+}
+
+interface Reward {
+  id: string
+  title: string
+  description: string
+  pointsCost: number
+  image: string
+  available: boolean
+  category: string
+}
+
+interface Redemption {
+  id: string
+  userId: string
+  userName: string
+  rewardId: string
+  rewardTitle: string
+  pointsCost: number
+  redeemedAt: Date
+  status: "pending" | "completed" | "rejected"
 }
 
 const AdminDashboard: React.FC = () => {
@@ -276,6 +306,12 @@ const AdminDashboard: React.FC = () => {
   } | null>(null)
   const [userFormPassword, setUserFormPassword] = useState<string>("")
   const [priceSearchTerm, setPriceSearchTerm] = useState<string>("")
+  const [rewards, setRewards] = useState<Reward[]>([])
+  const [showRewardModal, setShowRewardModal] = useState<boolean>(false)
+  const [currentReward, setCurrentReward] = useState<Reward | null>(null)
+  const [rewardSearchTerm, setRewardSearchTerm] = useState<string>("")
+  const [redemptions, setRedemptions] = useState<Redemption[]>([])
+  const [redemptionFilter, setRedemptionFilter] = useState<string>("all")
 
   const isSuperAdmin = userData?.role === "superadmin"
 
@@ -334,6 +370,8 @@ const AdminDashboard: React.FC = () => {
       await fetchMaterialPrices()
       await fetchRequests()
       await fetchTransactions()
+      await fetchRewards()
+      await fetchRedemptions()
       setIsLoading(false)
     } catch (error) {
       console.error("Error fetching dashboard data:", error)
@@ -582,6 +620,88 @@ const AdminDashboard: React.FC = () => {
     }
   }
 
+  const fetchRewards = async () => {
+    try {
+      const rewardsRef = collection(firestore, "rewards")
+      const snapshot = await getDocs(rewardsRef)
+      const rewardsList = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }) as Reward)
+      setRewards(rewardsList)
+    } catch (error) {
+      console.error("Error fetching rewards:", error)
+    }
+  }
+
+  const fetchRedemptions = async () => {
+    try {
+      const redemptionsRef = collection(firestore, "redemptions")
+      const q = query(redemptionsRef, orderBy("redeemedAt", "desc"))
+      const snapshot = await getDocs(q)
+      const list = snapshot.docs.map((doc) => {
+        const data = doc.data()
+        return {
+          id: doc.id,
+          userId: data.userId,
+          userName: data.userName,
+          rewardId: data.rewardId,
+          rewardTitle: data.rewardTitle,
+          pointsCost: data.pointsCost,
+          redeemedAt: data.redeemedAt?.toDate() || new Date(),
+          status: data.status || "pending",
+        } as Redemption
+      })
+      setRedemptions(list)
+    } catch (error) {
+      console.error("Error fetching redemptions:", error)
+    }
+  }
+
+  const handleApproveRedemption = async (redemption: Redemption) => {
+    try {
+      await updateDoc(doc(firestore, "redemptions", redemption.id), { status: "completed" })
+      await addDoc(collection(firestore, "notifications"), {
+        userId: redemption.userId,
+        title: "Reward Approved",
+        message: `Your redemption of "${redemption.rewardTitle}" has been approved!`,
+        read: false,
+        deleted: false,
+        createdAt: Timestamp.now(),
+        type: "reward",
+      })
+      showToastMessage("Redemption approved")
+      fetchRedemptions()
+    } catch (error) {
+      console.error("Error approving redemption:", error)
+      showToastMessage("Error approving redemption", "error")
+    }
+  }
+
+  const handleRejectRedemption = async (redemption: Redemption) => {
+    try {
+      await updateDoc(doc(firestore, "redemptions", redemption.id), { status: "rejected" })
+      // Refund points
+      const userRef = doc(firestore, "users", redemption.userId)
+      const userSnap = await getDocs(query(collection(firestore, "users"), where("__name__", "==", redemption.userId)))
+      if (!userSnap.empty) {
+        const currentPoints = userSnap.docs[0].data().points || 0
+        await updateDoc(userRef, { points: currentPoints + redemption.pointsCost })
+      }
+      await addDoc(collection(firestore, "notifications"), {
+        userId: redemption.userId,
+        title: "Reward Rejected",
+        message: `Your redemption of "${redemption.rewardTitle}" was rejected. ${redemption.pointsCost} points have been refunded.`,
+        read: false,
+        deleted: false,
+        createdAt: Timestamp.now(),
+        type: "reward",
+      })
+      showToastMessage("Redemption rejected & points refunded")
+      fetchRedemptions()
+    } catch (error) {
+      console.error("Error rejecting redemption:", error)
+      showToastMessage("Error rejecting redemption", "error")
+    }
+  }
+
   const handleRefresh = async (event: CustomEvent) => {
     try {
       await fetchDashboardData()
@@ -735,6 +855,10 @@ const AdminDashboard: React.FC = () => {
         await deleteDoc(doc(firestore, "users", itemToDelete.id))
         setUsers(users.filter((user) => user.id !== itemToDelete.id))
         showToastMessage("User deleted successfully")
+      } else if (itemToDelete.type === "reward") {
+        await deleteDoc(doc(firestore, "rewards", itemToDelete.id))
+        setRewards(rewards.filter((r) => r.id !== itemToDelete.id))
+        showToastMessage("Reward deleted successfully")
       }
     } catch (error) {
       console.error("Error deleting item:", error)
@@ -772,6 +896,54 @@ const AdminDashboard: React.FC = () => {
     } catch (error) {
       console.error("Error saving material price:", error)
       showToastMessage("Error saving material price", "error")
+    }
+  }
+
+  const handleAddReward = () => {
+    setCurrentReward({ id: "", title: "", description: "", pointsCost: 0, image: "", available: true, category: "voucher" })
+    setShowRewardModal(true)
+  }
+
+  const handleEditReward = (reward: Reward) => {
+    setCurrentReward({ ...reward, category: reward.category || "", image: reward.image || "" })
+    setShowRewardModal(true)
+  }
+
+  const handleDeleteReward = (id: string) => {
+    setItemToDelete({ id, type: "reward" })
+    setShowDeleteAlert(true)
+  }
+
+  const saveReward = async () => {
+    if (!currentReward) return
+    try {
+      if (currentReward.id) {
+        await updateDoc(doc(firestore, "rewards", currentReward.id), {
+          title: currentReward.title,
+          description: currentReward.description,
+          pointsCost: currentReward.pointsCost,
+          image: currentReward.image || "",
+          available: currentReward.available,
+          category: currentReward.category || "",
+        })
+        setRewards(rewards.map((r) => (r.id === currentReward.id ? currentReward : r)))
+        showToastMessage("Reward updated successfully")
+      } else {
+        const docRef = await addDoc(collection(firestore, "rewards"), {
+          title: currentReward.title,
+          description: currentReward.description,
+          pointsCost: currentReward.pointsCost,
+          image: currentReward.image || "",
+          available: currentReward.available,
+          category: currentReward.category || "",
+        })
+        setRewards([...rewards, { ...currentReward, id: docRef.id }])
+        showToastMessage("Reward added successfully")
+      }
+      setShowRewardModal(false)
+    } catch (error) {
+      console.error("Error saving reward:", error)
+      showToastMessage("Error saving reward", "error")
     }
   }
 
@@ -971,6 +1143,8 @@ const AdminDashboard: React.FC = () => {
     { value: "requests", label: "Requests", icon: <IconRecycle className="w-4 h-4" /> },
     { value: "transactions", label: "Transactions", icon: <IconCash className="w-4 h-4" /> },
     { value: "prices", label: "Prices", icon: <IconDocument className="w-4 h-4" /> },
+    { value: "rewards", label: "Rewards", icon: <IconGift className="w-4 h-4" /> },
+    { value: "redemptions", label: "Redemptions", icon: <IconCash className="w-4 h-4" /> },
   ]
 
   const getStatusColor = (status: string) => {
@@ -1366,6 +1540,11 @@ const AdminDashboard: React.FC = () => {
                                   </span>
                                 </div>
                                 <p className="text-sm text-gray-600">{request.materialType} - {request.quantity || 0} kg</p>
+                                {request.fulfillmentMethod && (
+                                  <span className="inline-block mt-1 px-2 py-0.5 rounded-full text-xs font-medium bg-violet-100 text-violet-700 capitalize">
+                                    {request.fulfillmentMethod}
+                                  </span>
+                                )}
                                 <p className="text-xs text-gray-400 mt-1">
                                   {request.createdAt?.toDate ? request.createdAt.toDate().toLocaleDateString() : "N/A"}
                                 </p>
@@ -1517,6 +1696,156 @@ const AdminDashboard: React.FC = () => {
                   </div>
                 </motion.div>
               )}
+
+              {/* Rewards Tab */}
+              {activeTab === "rewards" && (
+                <motion.div
+                  key="rewards"
+                  initial={{ opacity: 0, y: 20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -20 }}
+                  className="space-y-4"
+                >
+                  <button
+                    onClick={handleAddReward}
+                    className="w-full py-3 bg-gradient-to-r from-purple-500 to-indigo-500 text-white rounded-xl font-semibold shadow-lg flex items-center justify-center gap-2"
+                  >
+                    <IconAdd className="w-5 h-5" />
+                    Add Reward
+                  </button>
+
+                  <div className="relative">
+                    <IconSearch className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+                    <input
+                      type="text"
+                      value={rewardSearchTerm}
+                      onChange={(e) => setRewardSearchTerm(e.target.value)}
+                      placeholder="Search rewards..."
+                      className="w-full pl-10 pr-4 py-2.5 bg-white border border-gray-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-purple-500/50"
+                    />
+                  </div>
+
+                  <div className="bg-white rounded-2xl shadow-sm overflow-hidden">
+                    {rewards.filter((r) => r.title.toLowerCase().includes(rewardSearchTerm.toLowerCase()) || (r.description || "").toLowerCase().includes(rewardSearchTerm.toLowerCase())).length > 0 ? (
+                      <div className="divide-y divide-gray-100">
+                        {rewards.filter((r) => r.title.toLowerCase().includes(rewardSearchTerm.toLowerCase()) || (r.description || "").toLowerCase().includes(rewardSearchTerm.toLowerCase())).map((reward) => (
+                          <div key={reward.id} className="p-4 flex items-center gap-4">
+                            <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-green-100 to-emerald-200 flex items-center justify-center overflow-hidden flex-shrink-0">
+                              {reward.image ? (
+                                <img src={reward.image} alt={reward.title} className="w-full h-full object-cover" />
+                              ) : (
+                                <IconGift className="w-6 h-6 text-green-600" />
+                              )}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <p className="font-medium text-gray-800">{reward.title}</p>
+                              <p className="text-sm text-gray-500 truncate">{reward.description}</p>
+                              <div className="flex items-center gap-2 mt-1">
+                                <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-700">{reward.pointsCost} pts</span>
+                                <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${reward.available ? "bg-emerald-100 text-emerald-700" : "bg-red-100 text-red-700"}`}>
+                                  {reward.available ? "Available" : "Unavailable"}
+                                </span>
+                                <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-700">{reward.category}</span>
+                              </div>
+                            </div>
+                            <div className="flex gap-1 flex-shrink-0">
+                              <button onClick={() => handleEditReward(reward)} className="p-2 text-blue-600 hover:bg-blue-50 rounded-lg">
+                                <IconEdit className="w-4 h-4" />
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="p-8 text-center">
+                        <IconGift className="w-12 h-12 text-gray-300 mx-auto mb-3" />
+                        <p className="text-gray-500">No rewards found</p>
+                      </div>
+                    )}
+                  </div>
+                </motion.div>
+              )}
+
+              {/* Redemptions Tab */}
+              {activeTab === "redemptions" && (
+                <motion.div
+                  key="redemptions"
+                  initial={{ opacity: 0, y: 20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -20 }}
+                  className="space-y-4"
+                >
+                  {/* Filter */}
+                  <div className="flex gap-2">
+                    {["all", "pending", "completed", "rejected"].map((f) => (
+                      <button
+                        key={f}
+                        onClick={() => setRedemptionFilter(f)}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors capitalize ${
+                          redemptionFilter === f
+                            ? "bg-purple-500 text-white"
+                            : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                        }`}
+                      >
+                        {f} {f !== "all" && `(${redemptions.filter((r) => r.status === f).length})`}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="bg-white rounded-2xl shadow-sm overflow-hidden">
+                    {redemptions.filter((r) => redemptionFilter === "all" || r.status === redemptionFilter).length > 0 ? (
+                      <div className="divide-y divide-gray-100">
+                        {redemptions
+                          .filter((r) => redemptionFilter === "all" || r.status === redemptionFilter)
+                          .map((redemption) => (
+                            <div key={redemption.id} className="p-4">
+                              <div className="flex items-center justify-between mb-2">
+                                <div>
+                                  <p className="font-medium text-gray-800">{redemption.rewardTitle}</p>
+                                  <p className="text-sm text-gray-500">by {redemption.userName}</p>
+                                </div>
+                                <div className="text-right">
+                                  <p className="text-sm font-bold text-red-500">-{redemption.pointsCost} pts</p>
+                                  <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
+                                    redemption.status === "completed" ? "bg-green-100 text-green-700" :
+                                    redemption.status === "rejected" ? "bg-red-100 text-red-700" :
+                                    "bg-yellow-100 text-yellow-700"
+                                  }`}>
+                                    {redemption.status}
+                                  </span>
+                                </div>
+                              </div>
+                              <p className="text-xs text-gray-400 mb-2">
+                                {redemption.redeemedAt.toLocaleDateString()} at {redemption.redeemedAt.toLocaleTimeString()}
+                              </p>
+                              {redemption.status === "pending" && (
+                                <div className="flex gap-2">
+                                  <button
+                                    onClick={() => handleRejectRedemption(redemption)}
+                                    className="flex-1 py-2 bg-red-50 text-red-600 rounded-lg text-xs font-semibold hover:bg-red-100 transition-colors"
+                                  >
+                                    Reject & Refund
+                                  </button>
+                                  <button
+                                    onClick={() => handleApproveRedemption(redemption)}
+                                    className="flex-1 py-2 bg-green-50 text-green-600 rounded-lg text-xs font-semibold hover:bg-green-100 transition-colors"
+                                  >
+                                    Approve
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                      </div>
+                    ) : (
+                      <div className="p-8 text-center">
+                        <IconCash className="w-12 h-12 text-gray-300 mx-auto mb-3" />
+                        <p className="text-gray-500">No redemptions found</p>
+                      </div>
+                    )}
+                  </div>
+                </motion.div>
+              )}
             </AnimatePresence>
           )}
         </div>
@@ -1598,6 +1927,116 @@ const AdminDashboard: React.FC = () => {
                   </button>
                   <button
                     onClick={saveMaterialPrice}
+                    className="flex-1 py-3 bg-gradient-to-r from-purple-500 to-indigo-500 text-white rounded-xl font-semibold shadow-lg"
+                  >
+                    Save
+                  </button>
+                </div>
+              </motion.div>
+            </motion.div>
+          )}
+
+          {/* Reward Modal */}
+          {showRewardModal && currentReward && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+              onClick={() => setShowRewardModal(false)}
+            >
+              <motion.div
+                initial={{ scale: 0.9, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.9, opacity: 0 }}
+                transition={{ type: "spring", damping: 25 }}
+                onClick={(e) => e.stopPropagation()}
+                className="bg-white rounded-3xl p-6 w-full max-w-lg shadow-2xl max-h-[90vh] overflow-y-auto"
+              >
+                <h2 className="text-xl font-bold text-gray-800 mb-4">{currentReward.id ? "Edit" : "Add"} Reward</h2>
+
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Title</label>
+                    <input
+                      type="text"
+                      value={currentReward.title}
+                      onChange={(e) => setCurrentReward({ ...currentReward, title: e.target.value })}
+                      placeholder="Enter reward title"
+                      className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:ring-2 focus:ring-purple-500/50"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
+                    <textarea
+                      value={currentReward.description}
+                      onChange={(e) => setCurrentReward({ ...currentReward, description: e.target.value })}
+                      placeholder="Enter description"
+                      rows={3}
+                      className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:ring-2 focus:ring-purple-500/50 resize-none"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Points Cost</label>
+                      <input
+                        type="number"
+                        value={currentReward.pointsCost}
+                        onChange={(e) => setCurrentReward({ ...currentReward, pointsCost: parseInt(e.target.value) || 0 })}
+                        placeholder="0"
+                        className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:ring-2 focus:ring-purple-500/50"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Category</label>
+                      <select
+                        value={currentReward.category}
+                        onChange={(e) => setCurrentReward({ ...currentReward, category: e.target.value })}
+                        className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:ring-2 focus:ring-purple-500/50"
+                      >
+                        <option value="voucher">Voucher</option>
+                        <option value="discount">Discount</option>
+                        <option value="freebie">Freebie</option>
+                        <option value="cashback">Cashback</option>
+                        <option value="general">General</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Image URL</label>
+                    <input
+                      type="text"
+                      value={currentReward.image}
+                      onChange={(e) => setCurrentReward({ ...currentReward, image: e.target.value })}
+                      placeholder="Enter image URL"
+                      className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:ring-2 focus:ring-purple-500/50"
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    <label className="text-sm font-medium text-gray-700">Available</label>
+                    <button
+                      type="button"
+                      onClick={() => setCurrentReward({ ...currentReward, available: !currentReward.available })}
+                      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${currentReward.available ? "bg-green-500" : "bg-gray-300"}`}
+                    >
+                      <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform ${currentReward.available ? "translate-x-6" : "translate-x-1"}`} />
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex gap-3 mt-6">
+                  <button
+                    onClick={() => setShowRewardModal(false)}
+                    className="flex-1 py-3 bg-gray-100 text-gray-700 rounded-xl font-semibold"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={saveReward}
                     className="flex-1 py-3 bg-gradient-to-r from-purple-500 to-indigo-500 text-white rounded-xl font-semibold shadow-lg"
                   >
                     Save
@@ -1929,6 +2368,10 @@ const AdminDashboard: React.FC = () => {
             </motion.div>
           )}
         </AnimatePresence>
+
+        <div className="text-center py-4 mt-6 mb-4">
+          <p className="text-xs text-gray-400">© {new Date().getFullYear()} Trash-In-N-Out. All rights reserved.</p>
+        </div>
       </IonContent>
     </IonPage>
   )

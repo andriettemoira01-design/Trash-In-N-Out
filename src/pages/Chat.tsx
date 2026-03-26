@@ -15,6 +15,7 @@ import {
   query,
   where,
   getDocs,
+  getDoc,
   doc,
   addDoc,
   updateDoc,
@@ -23,9 +24,12 @@ import {
   serverTimestamp,
   limit,
   Timestamp,
+  writeBatch,
 } from "firebase/firestore"
 import { firestore } from "../firebase"
 import { motion, AnimatePresence } from "framer-motion"
+import { sendNotification } from "../services/notifications"
+import { Haptics, ImpactStyle } from "@capacitor/haptics"
 import "./Chat.css"
 
 // SVG Icon Components
@@ -109,6 +113,7 @@ interface JunkshopUser {
   businessName: string
   role: string
   avatarColor?: string
+  profileImage?: string
 }
 
 const Chat: React.FC = () => {
@@ -117,16 +122,21 @@ const Chat: React.FC = () => {
   const userInfo = userData || storedUserData
 
   const [chatRooms, setChatRooms] = useState<ChatRoom[]>([])
-  const [junkshops, setJunkshops] = useState<JunkshopUser[]>([])
+  const [allUsers, setAllUsers] = useState<JunkshopUser[]>([])
   const [selectedRoom, setSelectedRoom] = useState<ChatRoom | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
   const [newMessage, setNewMessage] = useState("")
   const [loading, setLoading] = useState(true)
   const [sendingMessage, setSendingMessage] = useState(false)
+  const [participantImages, setParticipantImages] = useState<{[key: string]: string}>({})
   const [searchTerm, setSearchTerm] = useState("")
   const [showNewChatModal, setShowNewChatModal] = useState(false)
+  const [modalSearchTerm, setModalSearchTerm] = useState("")
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+  const [isOtherTyping, setIsOtherTyping] = useState(false)
+  const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const prevMessageCountRef = useRef<number>(0)
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -135,6 +145,16 @@ const Chat: React.FC = () => {
   useEffect(() => {
     scrollToBottom()
   }, [messages])
+
+  const handleTyping = async () => {
+    if (!selectedRoom || !userInfo?.uid) return
+    const roomRef = doc(firestore, "chatRooms", selectedRoom.id)
+    await updateDoc(roomRef, { [`typingUsers.${userInfo.uid}`]: true }).catch(() => {})
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current)
+    typingTimeoutRef.current = setTimeout(async () => {
+      await updateDoc(roomRef, { [`typingUsers.${userInfo.uid}`]: false }).catch(() => {})
+    }, 2000)
+  }
 
   // Fetch chat rooms
   useEffect(() => {
@@ -169,61 +189,140 @@ const Chat: React.FC = () => {
     return () => unsubscribe()
   }, [userInfo?.uid])
 
-  // Fetch junkshops for new chat
+  // Fetch all users for new chat
   useEffect(() => {
-    const fetchJunkshops = async () => {
-      if (userInfo?.role !== "resident") return
+    const fetchAllUsers = async () => {
+      if (!userInfo?.uid) return
 
       const usersRef = collection(firestore, "users")
-      const q = query(usersRef, where("role", "==", "junkshop"))
-      const snapshot = await getDocs(q)
+      const snapshot = await getDocs(usersRef)
 
-      const junkshopList: JunkshopUser[] = []
+      const userList: JunkshopUser[] = []
       snapshot.forEach((doc) => {
         const data = doc.data()
-        junkshopList.push({
-          uid: doc.id,
-          name: data.name || "Unknown",
-          businessName: data.businessName || "Junkshop",
-          role: data.role,
-          avatarColor: getAvatarColor(doc.id),
-        })
+        if (doc.id !== userInfo.uid) {
+          userList.push({
+            uid: doc.id,
+            name: data.name || "Unknown",
+            businessName: data.businessName || data.name || "User",
+            role: data.role || "resident",
+            avatarColor: getAvatarColor(doc.id),
+            profileImage: data.profileImage || "",
+          })
+        }
       })
-      setJunkshops(junkshopList)
+      setAllUsers(userList)
     }
 
-    fetchJunkshops()
-  }, [userInfo?.role])
+    fetchAllUsers()
+  }, [userInfo?.uid])
+
+  // Fetch profile images for chat participants
+  useEffect(() => {
+    const fetchParticipantImages = async () => {
+      const allParticipantIds = new Set<string>()
+      chatRooms.forEach(room => {
+        room.participants.forEach(p => allParticipantIds.add(p))
+      })
+
+      const images: {[key: string]: string} = {}
+      for (const uid of allParticipantIds) {
+        try {
+          const userDoc = await getDoc(doc(firestore, "users", uid))
+          if (userDoc.exists() && userDoc.data().profileImage) {
+            images[uid] = userDoc.data().profileImage
+          }
+        } catch (e) {
+          // ignore
+        }
+      }
+      setParticipantImages(images)
+    }
+
+    if (chatRooms.length > 0) {
+      fetchParticipantImages()
+    }
+  }, [chatRooms])
 
   // Fetch messages for selected room
   useEffect(() => {
     if (!selectedRoom) return
 
+    prevMessageCountRef.current = 0
     const messagesRef = collection(firestore, "chatRooms", selectedRoom.id, "messages")
     const q = query(messagesRef, orderBy("createdAt", "asc"), limit(100))
 
-    const unsubscribe = onSnapshot(q, (snapshot) => {
+    const unsubscribe = onSnapshot(q, async (snapshot) => {
       const messagesList: Message[] = []
-      snapshot.forEach((doc) => {
-        const data = doc.data()
+      const unreadMessageIds: string[] = []
+      snapshot.forEach((docSnap) => {
+        const data = docSnap.data()
         messagesList.push({
-          id: doc.id,
+          id: docSnap.id,
           senderId: data.senderId,
           senderName: data.senderName,
           text: data.text,
           createdAt: data.createdAt?.toDate() || new Date(),
           read: data.read || false,
         })
+        if (data.senderId !== userInfo?.uid && !data.read) {
+          unreadMessageIds.push(docSnap.id)
+        }
       })
+
+      // Haptic feedback for new messages from others
+      const prevCount = prevMessageCountRef.current
+      if (prevCount > 0 && messagesList.length > prevCount) {
+        const newMsgs = messagesList.slice(prevCount)
+        if (newMsgs.some(m => m.senderId !== userInfo?.uid)) {
+          try { await Haptics.impact({ style: ImpactStyle.Light }) } catch {}
+        }
+      }
+      prevMessageCountRef.current = messagesList.length
+
       setMessages(messagesList)
 
-      // Mark messages as read
+      // Mark individual unread messages as read
+      if (userInfo?.uid && unreadMessageIds.length > 0) {
+        const batch = writeBatch(firestore)
+        unreadMessageIds.forEach(msgId => {
+          const msgRef = doc(firestore, "chatRooms", selectedRoom.id, "messages", msgId)
+          batch.update(msgRef, { read: true })
+        })
+        batch.commit().catch(err => console.error("Error marking messages as read", err))
+      }
+
+      // Mark room unread count
       if (userInfo?.uid) {
         markMessagesAsRead(selectedRoom.id)
       }
     })
 
     return () => unsubscribe()
+  }, [selectedRoom?.id, userInfo?.uid])
+
+  // Listen for typing indicators
+  useEffect(() => {
+    if (!selectedRoom || !userInfo?.uid) return
+
+    const roomRef = doc(firestore, "chatRooms", selectedRoom.id)
+    const unsubscribe = onSnapshot(roomRef, (snapshot) => {
+      const data = snapshot.data()
+      if (data?.typingUsers) {
+        const otherId = selectedRoom.participants.find(p => p !== userInfo.uid)
+        setIsOtherTyping(otherId ? data.typingUsers[otherId] === true : false)
+      } else {
+        setIsOtherTyping(false)
+      }
+    })
+
+    return () => {
+      unsubscribe()
+      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current)
+      updateDoc(doc(firestore, "chatRooms", selectedRoom.id), {
+        [`typingUsers.${userInfo.uid}`]: false
+      }).catch(() => {})
+    }
   }, [selectedRoom?.id, userInfo?.uid])
 
   const markMessagesAsRead = async (roomId: string) => {
@@ -273,19 +372,21 @@ const Chat: React.FC = () => {
 
     if (diff < 86400000 && now.getDate() === date.getDate()) {
       return `${formattedHours}:${minutes} ${ampm}`
-    } else if (diff < 604800000) {
-      return date.toLocaleDateString("en-US", { weekday: "short" })
-    } else {
-      return date.toLocaleDateString("en-US", { month: "short", day: "numeric" })
     }
+    const yesterday = new Date(now)
+    yesterday.setDate(yesterday.getDate() - 1)
+    if (date.getDate() === yesterday.getDate() && date.getMonth() === yesterday.getMonth() && date.getFullYear() === yesterday.getFullYear()) {
+      return "Yesterday"
+    }
+    return date.toLocaleDateString("en-US", { month: "short", day: "numeric" })
   }
 
-  const startNewChat = async (junkshop: JunkshopUser) => {
+  const startNewChat = async (otherUser: JunkshopUser) => {
     if (!userInfo?.uid) return
 
     // Check if chat room already exists
     const existingRoom = chatRooms.find(
-      (room) => room.participants.includes(junkshop.uid)
+      (room) => room.participants.includes(otherUser.uid)
     )
 
     if (existingRoom) {
@@ -297,33 +398,34 @@ const Chat: React.FC = () => {
     // Create new chat room
     try {
       const roomsRef = collection(firestore, "chatRooms")
+      const otherDisplayName = otherUser.role === "junkshop" ? otherUser.businessName : otherUser.name
       const newRoom = await addDoc(roomsRef, {
-        participants: [userInfo.uid, junkshop.uid],
+        participants: [userInfo.uid, otherUser.uid],
         participantNames: {
           [userInfo.uid]: userInfo.name || "User",
-          [junkshop.uid]: junkshop.businessName,
+          [otherUser.uid]: otherDisplayName,
         },
         participantRoles: {
           [userInfo.uid]: userInfo.role,
-          [junkshop.uid]: junkshop.role,
+          [otherUser.uid]: otherUser.role,
         },
         lastMessageTime: serverTimestamp(),
         unreadCount: {
           [userInfo.uid]: 0,
-          [junkshop.uid]: 0,
+          [otherUser.uid]: 0,
         },
       })
 
       setSelectedRoom({
         id: newRoom.id,
-        participants: [userInfo.uid, junkshop.uid],
+        participants: [userInfo.uid, otherUser.uid],
         participantNames: {
           [userInfo.uid]: userInfo.name || "User",
-          [junkshop.uid]: junkshop.businessName,
+          [otherUser.uid]: otherDisplayName,
         },
         participantRoles: {
           [userInfo.uid]: userInfo.role,
-          [junkshop.uid]: junkshop.role,
+          [otherUser.uid]: otherUser.role,
         },
         unreadCount: {},
       })
@@ -353,12 +455,25 @@ const Chat: React.FC = () => {
       // Update room with last message
       const otherParticipant = selectedRoom.participants.find((p) => p !== userInfo.uid)
       const roomRef = doc(firestore, "chatRooms", selectedRoom.id)
+      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current)
       await updateDoc(roomRef, {
         lastMessage: messageText,
         lastMessageTime: serverTimestamp(),
         lastMessageSenderId: userInfo.uid,
         [`unreadCount.${otherParticipant}`]: (selectedRoom.unreadCount[otherParticipant || ""] || 0) + 1,
+        [`typingUsers.${userInfo.uid}`]: false,
       })
+
+      // Send push notification to the other participant
+      if (otherParticipant) {
+        sendNotification({
+          userId: otherParticipant,
+          title: `Message from ${userInfo.name || "User"}`,
+          message: messageText.length > 100 ? messageText.slice(0, 100) + "..." : messageText,
+          type: "system",
+          relatedId: selectedRoom.id,
+        }).catch(() => {})
+      }
     } catch (error) {
       console.error("Error sending message", error)
       setNewMessage(messageText)
@@ -398,12 +513,20 @@ const Chat: React.FC = () => {
             >
               <IconArrowBack className="w-6 h-6" />
             </button>
-            <div className={`w-10 h-10 rounded-full bg-gradient-to-br ${getAvatarColor(otherId)} flex items-center justify-center text-white font-bold shadow-md`}>
-              {otherName.charAt(0).toUpperCase()}
+            <div className={`w-10 h-10 rounded-full bg-gradient-to-br ${getAvatarColor(otherId)} flex items-center justify-center text-white font-bold shadow-md overflow-hidden`}>
+              {participantImages[otherId] ? (
+                <img src={participantImages[otherId]} alt={otherName} className="w-full h-full object-cover" />
+              ) : (
+                otherName.charAt(0).toUpperCase()
+              )}
             </div>
             <div className="flex-1">
               <h3 className="font-semibold text-gray-800">{otherName}</h3>
-              <p className="text-xs text-gray-500 capitalize">{otherRole?.replace("_", " ")}</p>
+              {isOtherTyping ? (
+                <p className="text-xs text-emerald-500 font-medium animate-pulse">typing...</p>
+              ) : (
+                <p className="text-xs text-gray-500 capitalize">{otherRole?.replace("_", " ")}</p>
+              )}
             </div>
           </div>
         </div>
@@ -418,7 +541,7 @@ const Chat: React.FC = () => {
               ref={inputRef}
               type="text"
               value={newMessage}
-              onChange={(e) => setNewMessage(e.target.value)}
+              onChange={(e) => { setNewMessage(e.target.value); handleTyping() }}
               onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && sendMessage()}
               placeholder="Type a message..."
               className="flex-1 bg-gray-100 rounded-full px-5 py-3.5 text-base outline-none focus:ring-2 focus:ring-emerald-500/50 transition-all border border-gray-300"
@@ -465,8 +588,12 @@ const Chat: React.FC = () => {
                         className={`flex items-end gap-2 ${isOwn ? "justify-end" : "justify-start"}`}
                       >
                         {!isOwn && showAvatar && (
-                          <div className={`w-8 h-8 rounded-full bg-gradient-to-br ${getAvatarColor(message.senderId)} flex items-center justify-center text-white text-xs font-bold flex-shrink-0`}>
-                            {message.senderName.charAt(0).toUpperCase()}
+                          <div className={`w-8 h-8 rounded-full bg-gradient-to-br ${getAvatarColor(message.senderId)} flex items-center justify-center text-white text-xs font-bold flex-shrink-0 overflow-hidden`}>
+                            {participantImages[message.senderId] ? (
+                              <img src={participantImages[message.senderId]} alt={message.senderName} className="w-full h-full object-cover" />
+                            ) : (
+                              message.senderName.charAt(0).toUpperCase()
+                            )}
                           </div>
                         )}
                         {!isOwn && !showAvatar && <div className="w-8" />}
@@ -479,7 +606,7 @@ const Chat: React.FC = () => {
                           <div className={`flex items-center justify-end gap-1 mt-1 ${isOwn ? "text-white/70" : "text-gray-400"}`}>
                             <span className="text-[10px]">{formatMessageTime(message.createdAt)}</span>
                             {isOwn && (
-                              <IconCheckmarkDone className="w-3.5 h-3.5" />
+                              <IconCheckmarkDone className={`w-3.5 h-3.5 ${message.read ? "text-blue-200" : ""}`} />
                             )}
                           </div>
                         </div>
@@ -555,9 +682,8 @@ const Chat: React.FC = () => {
             />
           </motion.div>
 
-          {/* New Chat Button (for residents) */}
-          {userInfo?.role === "resident" && (
-            <motion.button
+          {/* New Chat Button */}
+          <motion.button
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: 0.2 }}
@@ -567,7 +693,6 @@ const Chat: React.FC = () => {
               <IconChatbubbles className="w-5 h-5" />
               Start New Conversation
             </motion.button>
-          )}
 
           {/* Chat Rooms List */}
           {loading ? (
@@ -606,8 +731,12 @@ const Chat: React.FC = () => {
                       }`}
                     >
                       <div className="flex items-center gap-4">
-                        <div className={`w-12 h-12 rounded-full bg-gradient-to-br ${getAvatarColor(otherId)} flex items-center justify-center text-white font-bold text-lg shadow-md flex-shrink-0`}>
-                          {otherName.charAt(0).toUpperCase()}
+                        <div className={`w-12 h-12 rounded-full bg-gradient-to-br ${getAvatarColor(otherId)} flex items-center justify-center text-white font-bold text-lg shadow-md flex-shrink-0 overflow-hidden`}>
+                          {participantImages[otherId] ? (
+                            <img src={participantImages[otherId]} alt={otherName} className="w-full h-full object-cover" />
+                          ) : (
+                            otherName.charAt(0).toUpperCase()
+                          )}
                         </div>
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center justify-between gap-2">
@@ -650,9 +779,7 @@ const Chat: React.FC = () => {
               </div>
               <p className="text-gray-600 font-medium">No conversations yet</p>
               <p className="text-sm text-gray-400 mt-1">
-                {userInfo?.role === "resident"
-                  ? "Start chatting with a junkshop"
-                  : "Waiting for messages from residents"}
+                Tap "Start New Conversation" to message someone
               </p>
             </motion.div>
           )}
@@ -665,50 +792,74 @@ const Chat: React.FC = () => {
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-end justify-center z-50"
-              onClick={() => setShowNewChatModal(false)}
+              className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+              onClick={() => { setShowNewChatModal(false); setModalSearchTerm("") }}
             >
               <motion.div
-                initial={{ y: "100%" }}
-                animate={{ y: 0 }}
-                exit={{ y: "100%" }}
+                initial={{ scale: 0.95, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.95, opacity: 0 }}
                 transition={{ type: "spring", damping: 25 }}
                 onClick={(e) => e.stopPropagation()}
-                className="bg-white rounded-t-3xl p-6 w-full max-w-lg shadow-2xl max-h-[80vh] overflow-y-auto"
+                className="bg-white rounded-2xl p-5 w-full max-w-md shadow-2xl max-h-[70vh] flex flex-col"
               >
-                <div className="w-12 h-1.5 bg-gray-300 rounded-full mx-auto mb-6"></div>
+                <div className="w-10 h-1 bg-gray-300 rounded-full mx-auto mb-4"></div>
                 
-                <h2 className="text-xl font-bold text-gray-800 mb-4">Select a Junkshop</h2>
+                <h2 className="text-lg font-bold text-gray-800 mb-3">Start a Conversation</h2>
                 
-                {junkshops.length > 0 ? (
-                  <div className="space-y-3">
-                    {junkshops.map((junkshop) => (
-                      <motion.button
-                        key={junkshop.uid}
-                        whileTap={{ scale: 0.98 }}
-                        onClick={() => startNewChat(junkshop)}
-                        className="w-full p-4 bg-gray-50 hover:bg-gray-100 rounded-xl flex items-center gap-4 transition-colors"
-                      >
-                        <div className={`w-12 h-12 rounded-full bg-gradient-to-br ${junkshop.avatarColor} flex items-center justify-center text-white shadow-md`}>
-                          <IconStore className="w-6 h-6" />
-                        </div>
-                        <div className="text-left">
-                          <h3 className="font-semibold text-gray-800">{junkshop.businessName}</h3>
-                          <p className="text-sm text-gray-500">{junkshop.name}</p>
-                        </div>
-                      </motion.button>
-                    ))}
+                <div className="relative mb-3">
+                  <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
+                  <input
+                    type="text"
+                    placeholder="Search users..."
+                    value={modalSearchTerm}
+                    onChange={(e) => setModalSearchTerm(e.target.value)}
+                    className="w-full pl-9 pr-3 py-2 bg-gray-100 border border-gray-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-green-500/50 focus:border-green-400 transition-all"
+                  />
+                </div>
+
+                {allUsers.length > 0 ? (
+                  <div className="space-y-2 overflow-y-auto flex-1 pr-1">
+                    {allUsers.filter((u) => {
+                      const name = (u.role === "junkshop" ? u.businessName : u.name) || ""
+                      return name.toLowerCase().includes(modalSearchTerm.toLowerCase())
+                    }).map((user) => {
+                      const hasExistingChat = chatRooms.some(room => room.participants.includes(user.uid))
+                      return (
+                        <motion.button
+                          key={user.uid}
+                          whileTap={{ scale: 0.98 }}
+                          onClick={() => startNewChat(user)}
+                          className="w-full p-3 bg-gray-50 hover:bg-gray-100 rounded-xl flex items-center gap-3 transition-colors"
+                        >
+                          <div className={`w-10 h-10 rounded-full bg-gradient-to-br ${user.avatarColor} flex items-center justify-center text-white shadow-md flex-shrink-0 overflow-hidden`}>
+                            {user.profileImage ? (
+                              <img src={user.profileImage} alt={user.name} className="w-full h-full object-cover" />
+                            ) : (
+                              (user.role === "junkshop" ? user.businessName : user.name).charAt(0).toUpperCase()
+                            )}
+                          </div>
+                          <div className="text-left flex-1 min-w-0">
+                            <h3 className="font-semibold text-gray-800 text-sm truncate">{user.role === "junkshop" ? user.businessName : user.name}</h3>
+                            <p className="text-xs text-gray-500 capitalize">{user.role?.replace("_", " ")}</p>
+                          </div>
+                          {hasExistingChat && (
+                            <span className="text-xs bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full flex-shrink-0">Active</span>
+                          )}
+                        </motion.button>
+                      )
+                    })}
                   </div>
                 ) : (
                   <div className="text-center py-8">
-                    <IconStore className="w-12 h-12 text-gray-300 mx-auto mb-3" />
-                    <p className="text-gray-500">No junkshops available</p>
+                    <IconPerson className="w-12 h-12 text-gray-300 mx-auto mb-3" />
+                    <p className="text-gray-500">No users available</p>
                   </div>
                 )}
 
                 <button
-                  onClick={() => setShowNewChatModal(false)}
-                  className="w-full mt-4 py-3 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl font-semibold transition-colors"
+                  onClick={() => { setShowNewChatModal(false); setModalSearchTerm("") }}
+                  className="w-full mt-3 py-2.5 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl font-semibold transition-colors text-sm"
                 >
                   Cancel
                 </button>

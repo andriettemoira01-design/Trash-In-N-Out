@@ -22,6 +22,7 @@ interface UserData {
   businessAddress?: string
   businessPhone?: string
   isActive?: boolean
+  profileImage?: string
 }
 
 interface AuthContextType {

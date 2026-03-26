@@ -2,6 +2,7 @@
 
 import type React from "react"
 import { useState, useEffect } from "react"
+import { createPortal } from "react-dom"
 import {
   IonContent,
   IonPage,
@@ -18,8 +19,10 @@ import {
   doc,
   updateDoc,
 } from "firebase/firestore"
-import { firestore } from "../firebase"
+import { firestore, storage } from "../firebase"
+import { ref, uploadBytes, getDownloadURL } from "firebase/storage"
 import { motion, AnimatePresence } from "framer-motion"
+import { getUserRatings, Rating } from "../services/ratings"
 
 // SVG Icon Components
 const IconPerson: React.FC<{ className?: string }> = ({ className }) => (
@@ -141,6 +144,10 @@ const Profile: React.FC = () => {
   const [saving, setSaving] = useState(false)
   const [showToast, setShowToast] = useState(false)
   const [toastMessage, setToastMessage] = useState("")
+  const [userRatings, setUserRatings] = useState<Rating[]>([])
+  const [averageRating, setAverageRating] = useState(0)
+  const [profileImage, setProfileImage] = useState<string>("")
+  const [uploadingImage, setUploadingImage] = useState(false)
 
   useEffect(() => {
     if (showToast) {
@@ -205,12 +212,63 @@ const Profile: React.FC = () => {
         businessAddress: userInfo.businessAddress || "",
         businessPhone: userInfo.businessPhone || "",
       })
+      if (userInfo.profileImage) {
+        setProfileImage(userInfo.profileImage)
+      }
     }
   }, [userInfo])
+
+  useEffect(() => {
+    if (userInfo?.uid) {
+      getUserRatings(userInfo.uid).then((ratings) => {
+        setUserRatings(ratings)
+        if (ratings.length > 0) {
+          const avg = ratings.reduce((sum, r) => sum + r.rating, 0) / ratings.length
+          setAverageRating(avg)
+        }
+      })
+    }
+  }, [userInfo?.uid])
 
   const handleRefresh = async (event: CustomEvent) => {
     await new Promise(resolve => setTimeout(resolve, 1000))
     event.detail.complete()
+  }
+
+  const handleImageUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file || !userInfo?.uid) return
+
+    if (!file.type.startsWith("image/")) {
+      setToastMessage("Please select an image file")
+      setShowToast(true)
+      return
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      setToastMessage("Image must be less than 5MB")
+      setShowToast(true)
+      return
+    }
+
+    try {
+      setUploadingImage(true)
+      const imageRef = ref(storage, `profileImages/${userInfo.uid}`)
+      await uploadBytes(imageRef, file)
+      const downloadURL = await getDownloadURL(imageRef)
+
+      const userRef = doc(firestore, "users", userInfo.uid)
+      await updateDoc(userRef, { profileImage: downloadURL })
+
+      setProfileImage(downloadURL)
+      setToastMessage("Profile image updated")
+      setShowToast(true)
+    } catch (error) {
+      console.error("Error uploading profile image:", error)
+      setToastMessage("Error uploading image")
+      setShowToast(true)
+    } finally {
+      setUploadingImage(false)
+    }
   }
 
   const handleSaveProfile = async () => {
@@ -327,8 +385,30 @@ const Profile: React.FC = () => {
             className="bg-white rounded-3xl shadow-xl p-6"
           >
             <div className="flex flex-col items-center -mt-16">
-              <div className={`w-24 h-24 rounded-full bg-gradient-to-br ${getAvatarGradient()} flex items-center justify-center text-white text-3xl font-bold shadow-xl border-4 border-white`}>
-                {(userInfo?.name || "U").charAt(0).toUpperCase()}
+              <div className="relative">
+                <div className={`w-24 h-24 rounded-full bg-gradient-to-br ${getAvatarGradient()} flex items-center justify-center text-white text-3xl font-bold shadow-xl border-4 border-white overflow-hidden`}>
+                  {profileImage ? (
+                    <img src={profileImage} alt="Profile" className="w-full h-full object-cover" />
+                  ) : (
+                    (userInfo?.name || "U").charAt(0).toUpperCase()
+                  )}
+                </div>
+                <label className="absolute -bottom-1 -right-1 w-8 h-8 bg-white rounded-full shadow-md flex items-center justify-center cursor-pointer border-2 border-gray-100">
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={handleImageUpload}
+                    className="hidden"
+                  />
+                  {uploadingImage ? (
+                    <div className="w-4 h-4 border-2 border-green-500 border-t-transparent rounded-full animate-spin"></div>
+                  ) : (
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" className="w-4 h-4 text-gray-600" fill="none" stroke="currentColor" strokeWidth="32">
+                      <path d="M350.54 148.68l-26.62-42.06C318.31 97.08 310.62 92 302 92h-92c-8.62 0-16.31 5.08-21.92 14.62l-26.62 42.06C155.85 155.23 148.62 160 140 160H80a32 32 0 00-32 32v208a32 32 0 0032 32h352a32 32 0 0032-32V192a32 32 0 00-32-32h-60c-8.65 0-15.85-4.77-21.46-11.32z" strokeLinecap="round" strokeLinejoin="round"/>
+                      <circle cx="256" cy="272" r="80" strokeMiterlimit="10"/>
+                    </svg>
+                  )}
+                </label>
               </div>
               <h2 className="text-xl font-bold text-gray-800 mt-3">{userInfo?.name || "User"}</h2>
               <span className={`inline-flex items-center gap-1.5 px-3 py-1 mt-2 rounded-full bg-gradient-to-r ${roleBadge.color} text-white text-xs font-medium shadow-md`}>
@@ -476,6 +556,58 @@ const Profile: React.FC = () => {
           </motion.div>
         </div>
 
+        {/* Ratings Section */}
+        <div className="px-4 mt-6">
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.15 }}
+          >
+            <div className="bg-white rounded-2xl p-4 shadow-sm mb-4">
+              <h3 className="font-semibold text-gray-800 mb-3 flex items-center gap-2">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" className="w-5 h-5 text-yellow-500" fill="currentColor">
+                  <path d="M394 480a16 16 0 01-9.39-3L256 383.76 127.39 477a16 16 0 01-24.55-18.08L153 310.35 23 221.2A16 16 0 0132 192h127.78l48.72-148.24a16 16 0 0130.5 0L288.22 192H416a16 16 0 019.05 28.8L295 310.35 345.16 459a16 16 0 01-15.16 21z"/>
+                </svg>
+                Ratings & Reviews
+              </h3>
+              <div className="flex items-center gap-4 mb-3">
+                <div className="text-3xl font-bold text-gray-800">{averageRating.toFixed(1)}</div>
+                <div>
+                  <div className="flex items-center gap-0.5">
+                    {[1, 2, 3, 4, 5].map((star) => (
+                      <svg key={star} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" className={`w-5 h-5 ${star <= Math.round(averageRating) ? "text-yellow-400" : "text-gray-300"}`} fill="currentColor">
+                        <path d="M394 480a16 16 0 01-9.39-3L256 383.76 127.39 477a16 16 0 01-24.55-18.08L153 310.35 23 221.2A16 16 0 0132 192h127.78l48.72-148.24a16 16 0 0130.5 0L288.22 192H416a16 16 0 019.05 28.8L295 310.35 345.16 459a16 16 0 01-15.16 21z"/>
+                      </svg>
+                    ))}
+                  </div>
+                  <p className="text-sm text-gray-500">{userRatings.length} review{userRatings.length !== 1 ? "s" : ""}</p>
+                </div>
+              </div>
+              {userRatings.length > 0 ? (
+                <div className="space-y-3 max-h-48 overflow-y-auto">
+                  {userRatings.slice(0, 5).map((rating, index) => (
+                    <div key={rating.id || index} className="p-3 bg-gray-50 rounded-xl">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="font-medium text-sm text-gray-700">{rating.fromUserName}</span>
+                        <div className="flex items-center gap-0.5">
+                          {[1, 2, 3, 4, 5].map((star) => (
+                            <svg key={star} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" className={`w-3 h-3 ${star <= rating.rating ? "text-yellow-400" : "text-gray-300"}`} fill="currentColor">
+                              <path d="M394 480a16 16 0 01-9.39-3L256 383.76 127.39 477a16 16 0 01-24.55-18.08L153 310.35 23 221.2A16 16 0 0132 192h127.78l48.72-148.24a16 16 0 0130.5 0L288.22 192H416a16 16 0 019.05 28.8L295 310.35 345.16 459a16 16 0 01-15.16 21z"/>
+                            </svg>
+                          ))}
+                        </div>
+                      </div>
+                      {rating.comment && <p className="text-sm text-gray-600">{rating.comment}</p>}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-sm text-gray-400 text-center py-4">No reviews yet</p>
+              )}
+            </div>
+          </motion.div>
+        </div>
+
         {/* Menu Section */}
         <div className="px-4 mt-6 mb-24">
           <motion.div
@@ -528,6 +660,7 @@ const Profile: React.FC = () => {
           </motion.div>
         </div>
 
+        {createPortal(<>
         {/* Edit Profile Modal */}
         <AnimatePresence>
           {showEditModal && (
@@ -544,11 +677,11 @@ const Profile: React.FC = () => {
                 exit={{ scale: 0.9, opacity: 0 }}
                 transition={{ type: "spring", damping: 25 }}
                 onClick={(e) => e.stopPropagation()}
-                className="bg-white rounded-2xl w-full max-w-sm shadow-2xl max-h-[80vh] flex flex-col overflow-hidden"
+                className="bg-white rounded-2xl w-full max-w-sm shadow-2xl max-h-[65vh] flex flex-col overflow-hidden"
               >
                 {/* Header */}
-                <div className="flex-shrink-0 flex items-center justify-between p-4 border-b border-gray-100">
-                  <h2 className="text-lg font-bold text-gray-800">Edit Profile</h2>
+                <div className="flex-shrink-0 flex items-center justify-between p-3 border-b border-gray-100">
+                  <h2 className="text-base font-bold text-gray-800">Edit Profile</h2>
                   <button onClick={() => setShowEditModal(false)} className="p-2 hover:bg-gray-100 rounded-full">
                     <IconClose className="w-5 h-5 text-gray-500" />
                   </button>
@@ -719,10 +852,10 @@ const Profile: React.FC = () => {
                 animate={{ scale: 1, opacity: 1 }}
                 exit={{ scale: 0.9, opacity: 0 }}
                 onClick={(e) => e.stopPropagation()}
-                className="bg-white rounded-3xl p-6 w-full max-w-sm shadow-2xl max-h-[80vh] overflow-y-auto"
+                className="bg-white rounded-3xl p-5 w-full max-w-sm shadow-2xl max-h-[65vh] overflow-y-auto"
               >
-                <div className="flex items-center justify-between mb-6">
-                  <h2 className="text-xl font-bold text-gray-800">Account Settings</h2>
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-lg font-bold text-gray-800">Account Settings</h2>
                   <button onClick={() => setShowSettingsModal(false)} className="p-2 hover:bg-gray-100 rounded-full">
                     <IconClose className="w-5 h-5 text-gray-500" />
                   </button>
@@ -769,10 +902,10 @@ const Profile: React.FC = () => {
                 animate={{ scale: 1, opacity: 1 }}
                 exit={{ scale: 0.9, opacity: 0 }}
                 onClick={(e) => e.stopPropagation()}
-                className="bg-white rounded-3xl p-6 w-full max-w-sm shadow-2xl max-h-[80vh] overflow-y-auto"
+                className="bg-white rounded-3xl p-5 w-full max-w-sm shadow-2xl max-h-[65vh] overflow-y-auto"
               >
-                <div className="flex items-center justify-between mb-6">
-                  <h2 className="text-xl font-bold text-gray-800">Help & Support</h2>
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-lg font-bold text-gray-800">Help & Support</h2>
                   <button onClick={() => setShowHelpModal(false)} className="p-2 hover:bg-gray-100 rounded-full">
                     <IconClose className="w-5 h-5 text-gray-500" />
                   </button>
@@ -835,10 +968,10 @@ const Profile: React.FC = () => {
                 exit={{ scale: 0.9, opacity: 0 }}
                 transition={{ type: "spring", damping: 25 }}
                 onClick={(e) => e.stopPropagation()}
-                className="bg-white rounded-3xl p-6 w-full max-w-lg shadow-2xl max-h-[85vh] overflow-y-auto"
+                className="bg-white rounded-3xl p-5 w-full max-w-sm shadow-2xl max-h-[65vh] overflow-y-auto"
               >
-                <div className="flex items-center justify-between mb-4">
-                  <h2 className="text-xl font-bold text-gray-800">Frequently Asked Questions</h2>
+                <div className="flex items-center justify-between mb-3">
+                  <h2 className="text-lg font-bold text-gray-800">Frequently Asked Questions</h2>
                   <button onClick={() => setShowFaqModal(false)} className="p-2 hover:bg-gray-100 rounded-full">
                     <IconClose className="w-5 h-5 text-gray-500" />
                   </button>
@@ -921,6 +1054,11 @@ const Profile: React.FC = () => {
             </motion.div>
           )}
         </AnimatePresence>
+        </>, document.body)}
+
+        <div className="text-center py-4 mt-6 mb-4">
+          <p className="text-xs text-gray-400">© {new Date().getFullYear()} Trash-In-N-Out. All rights reserved.</p>
+        </div>
       </IonContent>
     </IonPage>
   )

@@ -12,10 +12,12 @@ import { useAuth, getUserDataFromStorage } from "../contexts/AuthContext"
 import { firestore } from "../firebase"
 import { collection, query, where, getDocs, doc, deleteDoc, orderBy, addDoc, updateDoc, GeoPoint } from "firebase/firestore"
 import IframeMap from "../components/IframeMap"
-import { sendNotification } from "../services/notifications"
+import { sendNotification, sendAdminNewRequestNotification, sendMaterialRequestNotification, getAllJunkshopOwners } from "../services/notifications"
 import { motion, AnimatePresence } from "framer-motion"
 import { Capacitor } from "@capacitor/core"
 import { Geolocation } from "@capacitor/geolocation"
+import { submitRating, hasUserRatedRequest } from "../services/ratings"
+import { canResidentCreateRequest } from "../services/limits"
 
 // Google Maps API Key for reverse geocoding
 const GOOGLE_MAPS_API_KEY = "AIzaSyClNSGCnDzZvDvLdcGuS-28fSSAatlBCFI"
@@ -120,14 +122,19 @@ interface MaterialRequest {
   description: string
   quantity?: string
   address: string
+  fulfillmentMethod?: string
   status: "pending" | "accepted" | "completed"
   createdAt: Date
   targetJunkshopId?: string
   targetJunkshopName?: string
+  acceptedBy?: string
+  acceptedByName?: string
   location?: {
     lat: number
     lng: number
   }
+  remarks?: string
+  remarksBy?: string
 }
 
 interface MaterialPrice {
@@ -199,14 +206,29 @@ const UserMaterialRequests: React.FC = () => {
   const [materialType, setMaterialType] = useState("")
   const [description, setDescription] = useState("")
   const [quantity, setQuantity] = useState("")
+  const [fulfillmentMethod, setFulfillmentMethod] = useState("")
   const [selectedLocation, setSelectedLocation] = useState<{ lat: number; lng: number } | null>(null)
   const [addressText, setAddressText] = useState("")
   const [gettingInitialLocation, setGettingInitialLocation] = useState(false)
+  const [showRatingModal, setShowRatingModal] = useState(false)
+  const [ratingValue, setRatingValue] = useState(0)
+  const [ratingComment, setRatingComment] = useState("")
+  const [ratingRequestId, setRatingRequestId] = useState("")
+  const [ratingTargetUserId, setRatingTargetUserId] = useState("")
+  const [ratingTargetUserName, setRatingTargetUserName] = useState("")
+  const [ratedRequests, setRatedRequests] = useState<Set<string>>(new Set())
+  const [dailyLimitInfo, setDailyLimitInfo] = useState<{ remaining: number; limit: number }>({ remaining: 5, limit: 5 })
 
   const showToastMessage = (message: string, type: "success" | "error" = "success") => {
     setToastMessage(message)
     setToastType(type)
     setShowToast(true)
+  }
+
+  const checkDailyLimit = async () => {
+    if (!userInfo?.uid) return
+    const limitInfo = await canResidentCreateRequest(userInfo.uid)
+    setDailyLimitInfo({ remaining: limitInfo.remaining, limit: limitInfo.limit })
   }
 
   useEffect(() => {
@@ -243,8 +265,24 @@ const UserMaterialRequests: React.FC = () => {
     if (userInfo?.uid) {
       fetchMaterialRequests()
       fetchMaterialPrices()
+      checkDailyLimit()
     }
   }, [userInfo?.uid, fetchMaterialPrices])
+
+  const checkRatedRequests = useCallback(async () => {
+    if (!userInfo?.uid) return
+    const completed = materialRequests.filter(r => r.status === "completed")
+    const rated = new Set<string>()
+    for (const req of completed) {
+      const hasRated = await hasUserRatedRequest(userInfo.uid, req.id)
+      if (hasRated) rated.add(req.id)
+    }
+    setRatedRequests(rated)
+  }, [userInfo?.uid, materialRequests])
+
+  useEffect(() => {
+    checkRatedRequests()
+  }, [checkRatedRequests])
 
   const fetchMaterialRequests = useCallback(async () => {
     if (!userInfo?.uid) return
@@ -265,17 +303,22 @@ const UserMaterialRequests: React.FC = () => {
           type: data.type,
           description: data.description,
           quantity: data.quantity,
+          fulfillmentMethod: data.fulfillmentMethod,
           address: data.address,
           status: data.status,
           createdAt: data.createdAt?.toDate() || new Date(),
-          targetJunkshopId: data.targetJunkshopId,
-          targetJunkshopName: data.targetJunkshopName,
+          targetJunkshopId: data.targetJunkshopId || data.acceptedBy,
+          targetJunkshopName: data.targetJunkshopName || data.acceptedByName,
+          acceptedBy: data.acceptedBy,
+          acceptedByName: data.acceptedByName,
           location: data.location
             ? {
                 lat: data.location.latitude,
                 lng: data.location.longitude,
               }
             : undefined,
+          remarks: data.remarks,
+          remarksBy: data.remarksBy,
         })
       })
 
@@ -298,6 +341,12 @@ const UserMaterialRequests: React.FC = () => {
 
   // Auto-get user location when opening create modal
   const openCreateModal = async () => {
+    if (!userInfo?.uid) return
+    const limitInfo = await canResidentCreateRequest(userInfo.uid)
+    if (!limitInfo.allowed) {
+      showToastMessage(`Daily limit reached (${limitInfo.limit} requests per day)`, "error")
+      return
+    }
     setShowCreateModal(true)
     setGettingInitialLocation(true)
     
@@ -371,7 +420,7 @@ const UserMaterialRequests: React.FC = () => {
   }
 
   const handleSubmitRequest = async () => {
-    if (!materialType || !description || !selectedLocation || !userInfo) {
+    if (!materialType || !description || !fulfillmentMethod || !selectedLocation || !userInfo) {
       showToastMessage("Please fill in all required fields", "error")
       return
     }
@@ -391,6 +440,7 @@ const UserMaterialRequests: React.FC = () => {
         type: materialType,
         description,
         quantity,
+        fulfillmentMethod,
         location: new GeoPoint(selectedLocation.lat, selectedLocation.lng),
         address,
         status: "pending",
@@ -407,10 +457,18 @@ const UserMaterialRequests: React.FC = () => {
         relatedId: docRef.id,
       })
 
+      // Notify admins
+      await sendAdminNewRequestNotification(userInfo.name, materialType, docRef.id)
+
+      // Notify junkshop owners
+      const junkshopOwners = await getAllJunkshopOwners()
+      await sendMaterialRequestNotification(userInfo.uid, userInfo.name, materialType, junkshopOwners)
+
       setShowCreateModal(false)
       resetForm()
       showToastMessage("Request submitted successfully!", "success")
       fetchMaterialRequests()
+      checkDailyLimit()
     } catch (error) {
       console.error("Error submitting material request", error)
       showToastMessage("Error submitting request", "error")
@@ -425,6 +483,7 @@ const UserMaterialRequests: React.FC = () => {
     setMaterialType(request.type)
     setDescription(request.description)
     setQuantity(request.quantity || "")
+    setFulfillmentMethod(request.fulfillmentMethod || "")
     setSelectedLocation(request.location || null)
     setAddressText(request.address)
     setShowEditModal(true)
@@ -449,6 +508,7 @@ const UserMaterialRequests: React.FC = () => {
         type: materialType,
         description,
         quantity,
+        fulfillmentMethod,
         location: new GeoPoint(selectedLocation.lat, selectedLocation.lng),
         address,
       })
@@ -475,6 +535,7 @@ const UserMaterialRequests: React.FC = () => {
     setMaterialType("")
     setDescription("")
     setQuantity("")
+    setFulfillmentMethod("")
     setSelectedLocation(null)
     setAddressText("")
     setSelectedRequest(null)
@@ -600,6 +661,12 @@ const UserMaterialRequests: React.FC = () => {
 
           {/* Main Content */}
           <div className="px-4 -mt-16 pb-24 relative z-20">
+            {/* Daily Limit Banner */}
+            <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 mb-4 flex items-center justify-between">
+              <span className="text-sm text-blue-700">Daily Requests</span>
+              <span className="text-sm font-bold text-blue-700">{dailyLimitInfo.remaining}/{dailyLimitInfo.limit} remaining</span>
+            </div>
+
             {/* Filter Tabs */}
             <motion.div
               initial={{ opacity: 0, y: 20 }}
@@ -693,6 +760,17 @@ const UserMaterialRequests: React.FC = () => {
                           {request.quantity && (
                             <p className="text-xs text-gray-500 mt-1">Qty: {request.quantity}</p>
                           )}
+                          {request.fulfillmentMethod && (
+                            <span className="inline-block mt-1 px-2 py-0.5 rounded-full text-xs font-medium bg-violet-100 text-violet-700 capitalize">
+                              {request.fulfillmentMethod}
+                            </span>
+                          )}
+                          {request.remarks && (
+                            <div className="mt-2 p-2 bg-gray-50 rounded-lg border border-gray-100">
+                              <p className="text-xs text-gray-500">Remarks from {request.remarksBy || "reviewer"}:</p>
+                              <p className="text-sm text-gray-700">{request.remarks}</p>
+                            </div>
+                          )}
                         </div>
                       </div>
 
@@ -737,6 +815,24 @@ const UserMaterialRequests: React.FC = () => {
                           )}
                         </div>
                       </div>
+                      {request.status === "completed" && !ratedRequests.has(request.id) && (
+                        <button
+                          onClick={() => {
+                            setRatingRequestId(request.id)
+                            setRatingTargetUserId(request.targetJunkshopId || request.acceptedBy || "")
+                            setRatingTargetUserName(request.targetJunkshopName || request.acceptedByName || "Junkshop")
+                            setRatingValue(0)
+                            setRatingComment("")
+                            setShowRatingModal(true)
+                          }}
+                          className="mt-2 w-full py-2 bg-yellow-50 text-yellow-700 border border-yellow-200 rounded-xl text-sm font-medium flex items-center justify-center gap-1"
+                        >
+                          ⭐ Rate Transaction
+                        </button>
+                      )}
+                      {request.status === "completed" && ratedRequests.has(request.id) && (
+                        <div className="mt-2 text-center text-xs text-gray-400">✓ Rated</div>
+                      )}
                     </div>
                   </motion.div>
                 ))}
@@ -760,7 +856,7 @@ const UserMaterialRequests: React.FC = () => {
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+              className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-start justify-center z-50 p-4 pt-10"
               onClick={() => { setShowCreateModal(false); resetForm(); }}
             >
               <motion.div
@@ -768,7 +864,7 @@ const UserMaterialRequests: React.FC = () => {
                 animate={{ scale: 1, opacity: 1 }}
                 exit={{ scale: 0.9, opacity: 0 }}
                 onClick={(e) => e.stopPropagation()}
-                className="bg-white rounded-2xl w-full max-w-sm shadow-2xl max-h-[85vh] flex flex-col overflow-hidden"
+                className="bg-white rounded-2xl w-full max-w-sm shadow-2xl max-h-[80vh] flex flex-col overflow-hidden"
               >
                 {/* Header */}
                 <div className="flex-shrink-0 bg-gradient-to-r from-emerald-500 to-green-500 px-4 py-4 flex items-center justify-between">
@@ -821,6 +917,32 @@ const UserMaterialRequests: React.FC = () => {
                     />
                   </div>
 
+                  {/* Fulfillment Method */}
+                  <div className="mb-4">
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Fulfillment Method *</label>
+                    <div className="grid grid-cols-3 gap-2">
+                      {[
+                        { value: "pickup", label: "Pickup", icon: "🚛" },
+                        { value: "delivery", label: "Delivery", icon: "📦" },
+                        { value: "other", label: "Other", icon: "📋" },
+                      ].map((method) => (
+                        <button
+                          key={method.value}
+                          type="button"
+                          onClick={() => setFulfillmentMethod(method.value)}
+                          className={`p-3 rounded-xl border-2 transition-all text-center ${
+                            fulfillmentMethod === method.value
+                              ? "border-emerald-500 bg-emerald-50"
+                              : "border-gray-200 bg-white"
+                          }`}
+                        >
+                          <span className="text-xl block mb-1">{method.icon}</span>
+                          <span className="text-xs font-medium">{method.label}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
                   {/* Description */}
                   <div className="mb-4">
                     <label className="block text-xs font-medium text-gray-600 mb-2">Description *</label>
@@ -864,7 +986,7 @@ const UserMaterialRequests: React.FC = () => {
                 <div className="flex-shrink-0 p-4 border-t border-gray-100 bg-white">
                   <button
                     onClick={handleSubmitRequest}
-                    disabled={loading || !materialType || !description || !selectedLocation}
+                    disabled={loading || !materialType || !description || !fulfillmentMethod || !selectedLocation}
                     className="w-full py-3.5 bg-gradient-to-r from-emerald-500 to-green-500 text-white rounded-xl font-semibold shadow-lg disabled:opacity-50 flex items-center justify-center gap-2"
                   >
                     <IconSend className="w-5 h-5" />
@@ -883,7 +1005,7 @@ const UserMaterialRequests: React.FC = () => {
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+              className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-start justify-center z-50 p-4 pt-10"
               onClick={() => { setShowEditModal(false); resetForm(); }}
             >
               <motion.div
@@ -891,7 +1013,7 @@ const UserMaterialRequests: React.FC = () => {
                 animate={{ scale: 1, opacity: 1 }}
                 exit={{ scale: 0.9, opacity: 0 }}
                 onClick={(e) => e.stopPropagation()}
-                className="bg-white rounded-2xl w-full max-w-sm shadow-2xl max-h-[85vh] flex flex-col overflow-hidden"
+                className="bg-white rounded-2xl w-full max-w-sm shadow-2xl max-h-[80vh] flex flex-col overflow-hidden"
               >
                 {/* Header */}
                 <div className="flex-shrink-0 bg-gradient-to-r from-blue-500 to-indigo-500 px-4 py-4 flex items-center justify-between">
@@ -944,6 +1066,32 @@ const UserMaterialRequests: React.FC = () => {
                     />
                   </div>
 
+                  {/* Fulfillment Method */}
+                  <div className="mb-4">
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Fulfillment Method *</label>
+                    <div className="grid grid-cols-3 gap-2">
+                      {[
+                        { value: "pickup", label: "Pickup", icon: "🚛" },
+                        { value: "delivery", label: "Delivery", icon: "📦" },
+                        { value: "other", label: "Other", icon: "📋" },
+                      ].map((method) => (
+                        <button
+                          key={method.value}
+                          type="button"
+                          onClick={() => setFulfillmentMethod(method.value)}
+                          className={`p-3 rounded-xl border-2 transition-all text-center ${
+                            fulfillmentMethod === method.value
+                              ? "border-blue-500 bg-blue-50"
+                              : "border-gray-200 bg-white"
+                          }`}
+                        >
+                          <span className="text-xl block mb-1">{method.icon}</span>
+                          <span className="text-xs font-medium">{method.label}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
                   {/* Description */}
                   <div className="mb-4">
                     <label className="block text-xs font-medium text-gray-600 mb-2">Description *</label>
@@ -979,7 +1127,7 @@ const UserMaterialRequests: React.FC = () => {
                 <div className="flex-shrink-0 p-4 border-t border-gray-100 bg-white">
                   <button
                     onClick={handleUpdateRequest}
-                    disabled={loading || !materialType || !description || !selectedLocation}
+                    disabled={loading || !materialType || !description || !fulfillmentMethod || !selectedLocation}
                     className="w-full py-3.5 bg-gradient-to-r from-blue-500 to-indigo-500 text-white rounded-xl font-semibold shadow-lg disabled:opacity-50 flex items-center justify-center gap-2"
                   >
                     <IconCheck className="w-5 h-5" />
@@ -998,7 +1146,7 @@ const UserMaterialRequests: React.FC = () => {
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+              className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-start justify-center z-50 p-4 pt-10"
               onClick={() => { setShowViewModal(false); setSelectedRequest(null); }}
             >
               <motion.div
@@ -1006,7 +1154,7 @@ const UserMaterialRequests: React.FC = () => {
                 animate={{ scale: 1, opacity: 1 }}
                 exit={{ scale: 0.9, opacity: 0 }}
                 onClick={(e) => e.stopPropagation()}
-                className="bg-white rounded-2xl w-full max-w-sm shadow-2xl max-h-[85vh] flex flex-col overflow-hidden"
+                className="bg-white rounded-2xl w-full max-w-sm shadow-2xl max-h-[80vh] flex flex-col overflow-hidden"
               >
                 {/* Header */}
                 <div className={`flex-shrink-0 px-4 py-4 flex items-center justify-between ${
@@ -1052,6 +1200,16 @@ const UserMaterialRequests: React.FC = () => {
                     </div>
                   )}
 
+                  {/* Fulfillment Method */}
+                  {selectedRequest.fulfillmentMethod && (
+                    <div className="mb-4">
+                      <label className="block text-xs font-medium text-gray-500 mb-1">Fulfillment Method</label>
+                      <span className="inline-flex items-center px-3 py-1.5 rounded-full text-sm font-medium bg-violet-100 text-violet-700 capitalize">
+                        {selectedRequest.fulfillmentMethod}
+                      </span>
+                    </div>
+                  )}
+
                   {/* Description */}
                   <div className="mb-4">
                     <label className="block text-xs font-medium text-gray-500 mb-1">Description</label>
@@ -1091,6 +1249,17 @@ const UserMaterialRequests: React.FC = () => {
                       <div className="flex items-center gap-2 p-3 bg-orange-50 rounded-xl">
                         <IconStore className="w-5 h-5 text-orange-500" />
                         <p className="text-gray-800 font-medium">{selectedRequest.targetJunkshopName}</p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Remarks */}
+                  {selectedRequest.remarks && (
+                    <div className="mb-4">
+                      <label className="block text-xs font-medium text-gray-500 mb-1">Remarks</label>
+                      <div className="p-3 bg-gray-50 rounded-xl border border-gray-100">
+                        <p className="text-xs text-gray-500 mb-1">From {selectedRequest.remarksBy || "reviewer"}:</p>
+                        <p className="text-sm text-gray-700">{selectedRequest.remarks}</p>
                       </div>
                     </div>
                   )}
@@ -1187,6 +1356,74 @@ const UserMaterialRequests: React.FC = () => {
                       {loading ? "Deleting..." : "Delete"}
                     </button>
                   </div>
+                </div>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Rating Modal */}
+        <AnimatePresence>
+          {showRatingModal && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+              onClick={() => setShowRatingModal(false)}
+            >
+              <motion.div
+                initial={{ scale: 0.9, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.9, opacity: 0 }}
+                className="bg-white rounded-3xl p-6 w-full max-w-sm shadow-2xl"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <h3 className="text-lg font-bold text-gray-800 mb-2 text-center">Rate Transaction</h3>
+                <p className="text-sm text-gray-500 text-center mb-4">How was your experience with {ratingTargetUserName}?</p>
+                <div className="flex justify-center gap-2 mb-4">
+                  {[1, 2, 3, 4, 5].map((star) => (
+                    <button key={star} onClick={() => setRatingValue(star)} className="p-1">
+                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" className={`w-10 h-10 transition-colors ${star <= ratingValue ? "text-yellow-400" : "text-gray-300"}`} fill="currentColor">
+                        <path d="M394 480a16 16 0 01-9.39-3L256 383.76 127.39 477a16 16 0 01-24.55-18.08L153 310.35 23 221.2A16 16 0 0132 192h127.78l48.72-148.24a16 16 0 0130.5 0L288.22 192H416a16 16 0 019.05 28.8L295 310.35 345.16 459a16 16 0 01-15.16 21z"/>
+                      </svg>
+                    </button>
+                  ))}
+                </div>
+                <textarea
+                  value={ratingComment}
+                  onChange={(e) => setRatingComment(e.target.value)}
+                  placeholder="Add a comment (optional)..."
+                  rows={3}
+                  className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:ring-2 focus:ring-yellow-500/50 resize-none mb-4"
+                />
+                <div className="flex gap-3">
+                  <button onClick={() => setShowRatingModal(false)} className="flex-1 py-3 bg-gray-100 text-gray-700 rounded-xl font-semibold">Cancel</button>
+                  <button
+                    onClick={async () => {
+                      if (ratingValue === 0) return
+                      try {
+                        await submitRating({
+                          fromUserId: userInfo!.uid,
+                          fromUserName: userInfo!.name,
+                          toUserId: ratingTargetUserId,
+                          toUserName: ratingTargetUserName,
+                          requestId: ratingRequestId,
+                          rating: ratingValue,
+                          comment: ratingComment,
+                        })
+                        setShowRatingModal(false)
+                        setRatedRequests(prev => new Set([...prev, ratingRequestId]))
+                        showToastMessage("Rating submitted!", "success")
+                      } catch (error: any) {
+                        showToastMessage(error.message || "Error submitting rating", "error")
+                      }
+                    }}
+                    disabled={ratingValue === 0}
+                    className="flex-1 py-3 bg-gradient-to-r from-yellow-400 to-amber-500 text-white rounded-xl font-semibold shadow-lg disabled:opacity-50"
+                  >
+                    Submit Rating
+                  </button>
                 </div>
               </motion.div>
             </motion.div>

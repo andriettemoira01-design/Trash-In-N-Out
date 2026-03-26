@@ -102,3 +102,110 @@ export const getAllJunkshopOwners = async () => {
     return []
   }
 }
+
+// Get all admin and superadmin users
+export const getAllAdmins = async () => {
+  try {
+    const usersRef = collection(firestore, "users")
+    const adminQuery = query(usersRef, where("role", "in", ["admin", "superadmin"]))
+    const querySnapshot = await getDocs(adminQuery)
+    const admins: string[] = []
+    querySnapshot.forEach((doc) => {
+      admins.push(doc.id)
+    })
+    return admins
+  } catch (error) {
+    console.error("Error getting admins:", error)
+    return []
+  }
+}
+
+// Notify admins when a new material request is created
+export const sendAdminNewRequestNotification = async (
+  userName: string,
+  materialType: string,
+  requestId: string,
+) => {
+  try {
+    const admins = await getAllAdmins()
+    for (const adminId of admins) {
+      await sendNotification({
+        userId: adminId,
+        title: "New Material Request",
+        message: `${userName} submitted a new ${materialType} request.`,
+        type: "request",
+        relatedId: requestId,
+      })
+    }
+    return true
+  } catch (error) {
+    console.error("Error sending admin notification:", error)
+    return false
+  }
+}
+
+// Notify admins when a request is accepted/completed by junkshop
+export const sendAdminStatusNotification = async (
+  junkshopName: string,
+  action: string,
+  materialType: string,
+  requestId: string,
+) => {
+  try {
+    const admins = await getAllAdmins()
+    for (const adminId of admins) {
+      await sendNotification({
+        userId: adminId,
+        title: `Request ${action}`,
+        message: `${junkshopName} has ${action} a ${materialType} request.`,
+        type: "status",
+        relatedId: requestId,
+      })
+    }
+    return true
+  } catch (error) {
+    console.error("Error sending admin status notification:", error)
+    return false
+  }
+}
+
+// Notify junkshop when their request action is acknowledged
+export const sendJunkshopNotification = async (
+  junkshopId: string,
+  title: string,
+  message: string,
+  requestId?: string,
+) => {
+  try {
+    await sendNotification({
+      userId: junkshopId,
+      title,
+      message,
+      type: "status",
+      relatedId: requestId,
+    })
+    return true
+  } catch (error) {
+    console.error("Error sending junkshop notification:", error)
+    return false
+  }
+}
+
+// Notify all admins of a new user registration
+export const sendNewUserNotification = async (userName: string, role: string) => {
+  try {
+    const admins = await getAllAdmins()
+    for (const adminId of admins) {
+      await sendNotification({
+        userId: adminId,
+        title: "New User Registered",
+        message: `${userName} registered as a ${role}.`,
+        type: "system",
+      })
+    }
+    return true
+  } catch (error) {
+    console.error("Error sending new user notification:", error)
+    return false
+  }
+}

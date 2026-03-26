@@ -636,6 +636,10 @@ const Rewards: React.FC = () => {
             </motion.div>
           )}
         </AnimatePresence>
+
+        <div className="text-center py-4 mt-6 mb-4">
+          <p className="text-xs text-gray-400">© {new Date().getFullYear()} Trash-In-N-Out. All rights reserved.</p>
+        </div>
       </IonContent>
     </IonPage>
   )

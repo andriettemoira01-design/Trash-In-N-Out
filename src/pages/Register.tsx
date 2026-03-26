@@ -25,6 +25,7 @@ import {
   shieldCheckmarkOutline,
 } from "ionicons/icons"
 import { useAuth } from "../contexts/AuthContext"
+import { sendNewUserNotification } from "../services/notifications"
 import { useHistory } from "react-router"
 import { motion, AnimatePresence } from "framer-motion"
 
@@ -33,6 +34,8 @@ const Register: React.FC = () => {
   const [password, setPassword] = useState("")
   const [confirmPassword, setConfirmPassword] = useState("")
   const [name, setName] = useState("")
+  const [phone, setPhone] = useState("")
+  const [address, setAddress] = useState("")
   const [role, setRole] = useState<"resident" | "junkshop">("resident")
   const [businessName, setBusinessName] = useState("")
   const [businessAddress, setBusinessAddress] = useState("")
@@ -43,8 +46,10 @@ const Register: React.FC = () => {
   const [showConfirmPassword, setShowConfirmPassword] = useState(false)
   const [showToast, setShowToast] = useState(false)
   const [step, setStep] = useState(1) // Multi-step form
+  const [touched, setTouched] = useState<{[key: string]: boolean}>({})
   const { register } = useAuth()
   const history = useHistory()
+  const markTouched = (field: string) => setTouched(prev => ({ ...prev, [field]: true }))
 
   // Auto-hide toast after 3 seconds
   useEffect(() => {
@@ -56,6 +61,7 @@ const Register: React.FC = () => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+    setTouched(prev => ({ ...prev, password: true, confirmPassword: true }))
 
     if (password !== confirmPassword) {
       setError("Passwords do not match")
@@ -88,14 +94,19 @@ const Register: React.FC = () => {
       setLoading(true)
       
       // Prepare additional data for junkshop
-      const additionalData = role === "junkshop" ? {
-        businessName: businessName.trim(),
-        businessAddress: businessAddress.trim(),
-        businessPhone: businessPhone.trim(),
-        isActive: true,
-      } : {}
+      const additionalData = {
+        phone: phone.trim(),
+        address: address.trim(),
+        ...(role === "junkshop" ? {
+          businessName: businessName.trim(),
+          businessAddress: businessAddress.trim(),
+          businessPhone: businessPhone.trim(),
+          isActive: true,
+        } : {}),
+      }
       
       await register(email, password, name, role, additionalData)
+      await sendNewUserNotification(name, role)
       history.push("/app/home")
     } catch (error: any) {
       setError(error.message || "Failed to create an account")
@@ -105,7 +116,7 @@ const Register: React.FC = () => {
     }
   }
 
-  const canProceedToStep2 = name.trim() && email.trim()
+  const canProceedToStep2 = name.trim() && email.trim() && phone.trim() && address.trim()
   const canProceedToStep3 = role === "resident" || (businessName.trim() && businessAddress.trim())
 
   const nextStep = () => {
@@ -313,10 +324,12 @@ const Register: React.FC = () => {
                             value={name}
                             placeholder="Juan Dela Cruz"
                             onChange={(e) => setName(e.target.value)}
-                            className="w-full pl-12 pr-4 py-4 bg-white border-2 border-gray-200 rounded-xl text-gray-700 placeholder-gray-400 focus:border-green-500 focus:ring-4 focus:ring-green-100 transition-all outline-none"
+                            onBlur={() => markTouched('name')}
+                            className={`w-full pl-12 pr-4 py-4 bg-white border-2 rounded-xl text-gray-700 placeholder-gray-400 focus:border-green-500 focus:ring-4 focus:ring-green-100 transition-all outline-none ${touched.name && !name.trim() ? 'border-red-500' : 'border-gray-200'}`}
                             required
                           />
                         </div>
+                        {touched.name && !name.trim() && <p className="text-red-500 text-xs mt-1">This field is required</p>}
                       </div>
 
                       {/* Email Input */}
@@ -331,17 +344,47 @@ const Register: React.FC = () => {
                             value={email}
                             placeholder="you@example.com"
                             onChange={(e) => setEmail(e.target.value)}
-                            className="w-full pl-12 pr-4 py-4 bg-white border-2 border-gray-200 rounded-xl text-gray-700 placeholder-gray-400 focus:border-green-500 focus:ring-4 focus:ring-green-100 transition-all outline-none"
+                            onBlur={() => markTouched('email')}
+                            className={`w-full pl-12 pr-4 py-4 bg-white border-2 rounded-xl text-gray-700 placeholder-gray-400 focus:border-green-500 focus:ring-4 focus:ring-green-100 transition-all outline-none ${touched.email && !email.trim() ? 'border-red-500' : 'border-gray-200'}`}
                             required
                           />
                         </div>
+                        {touched.email && !email.trim() && <p className="text-red-500 text-xs mt-1">This field is required</p>}
+                      </div>
+
+                      {/* Phone Input */}
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1.5">Phone Number <span className="text-red-500">*</span></label>
+                        <input
+                          type="tel"
+                          value={phone}
+                          onChange={(e) => setPhone(e.target.value)}
+                          onBlur={() => markTouched('phone')}
+                          placeholder="Enter your phone number"
+                          className={`w-full px-4 py-3 bg-gray-50 border ${touched.phone && !phone ? 'border-red-500' : 'border-gray-200'} rounded-xl outline-none focus:ring-2 focus:ring-green-500/50 text-gray-800`}
+                        />
+                        {touched.phone && !phone && <p className="text-red-500 text-xs mt-1">Phone number is required</p>}
+                      </div>
+
+                      {/* Address Input */}
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1.5">Address <span className="text-red-500">*</span></label>
+                        <input
+                          type="text"
+                          value={address}
+                          onChange={(e) => setAddress(e.target.value)}
+                          onBlur={() => markTouched('address')}
+                          placeholder="Enter your address"
+                          className={`w-full px-4 py-3 bg-gray-50 border ${touched.address && !address ? 'border-red-500' : 'border-gray-200'} rounded-xl outline-none focus:ring-2 focus:ring-green-500/50 text-gray-800`}
+                        />
+                        {touched.address && !address && <p className="text-red-500 text-xs mt-1">Address is required</p>}
                       </div>
 
                       <motion.button
                         whileHover={{ scale: 1.01 }}
                         whileTap={{ scale: 0.99 }}
                         type="button"
-                        onClick={nextStep}
+                        onClick={() => { setTouched(prev => ({ ...prev, name: true, email: true, phone: true, address: true })); nextStep(); }}
                         disabled={!canProceedToStep2}
                         className={`w-full py-4 rounded-xl font-semibold text-white flex items-center justify-center gap-2 transition-all ${
                           canProceedToStep2
@@ -559,7 +602,8 @@ const Register: React.FC = () => {
                             value={password}
                             placeholder="Min. 6 characters"
                             onChange={(e) => setPassword(e.target.value)}
-                            className="w-full pl-12 pr-12 py-4 bg-white border-2 border-gray-200 rounded-xl text-gray-700 placeholder-gray-400 focus:border-green-500 focus:ring-4 focus:ring-green-100 transition-all outline-none"
+                            onBlur={() => markTouched('password')}
+                            className={`w-full pl-12 pr-12 py-4 bg-white border-2 rounded-xl text-gray-700 placeholder-gray-400 focus:border-green-500 focus:ring-4 focus:ring-green-100 transition-all outline-none ${touched.password && !password ? 'border-red-500' : 'border-gray-200'}`}
                             required
                           />
                           <button
@@ -579,6 +623,7 @@ const Register: React.FC = () => {
                             )}
                           </button>
                         </div>
+                        {touched.password && !password && <p className="text-red-500 text-xs mt-1">This field is required</p>}
                         {/* Password Strength Indicator */}
                         {password && (
                           <div className="mt-2">
@@ -615,12 +660,15 @@ const Register: React.FC = () => {
                             value={confirmPassword}
                             placeholder="Confirm your password"
                             onChange={(e) => setConfirmPassword(e.target.value)}
+                            onBlur={() => markTouched('confirmPassword')}
                             className={`w-full pl-12 pr-12 py-4 bg-white border-2 rounded-xl text-gray-700 placeholder-gray-400 focus:ring-4 transition-all outline-none ${
-                              confirmPassword && confirmPassword !== password 
-                                ? 'border-red-300 focus:border-red-500 focus:ring-red-100' 
-                                : confirmPassword && confirmPassword === password
-                                  ? 'border-green-300 focus:border-green-500 focus:ring-green-100'
-                                  : 'border-gray-200 focus:border-green-500 focus:ring-green-100'
+                              touched.confirmPassword && !confirmPassword
+                                ? 'border-red-500 focus:border-red-500 focus:ring-red-100'
+                                : confirmPassword && confirmPassword !== password 
+                                  ? 'border-red-300 focus:border-red-500 focus:ring-red-100' 
+                                  : confirmPassword && confirmPassword === password
+                                    ? 'border-green-300 focus:border-green-500 focus:ring-green-100'
+                                    : 'border-gray-200 focus:border-green-500 focus:ring-green-100'
                             }`}
                             required
                           />
@@ -643,6 +691,9 @@ const Register: React.FC = () => {
                         </div>
                         {confirmPassword && confirmPassword !== password && (
                           <p className="text-xs text-red-500 mt-1">Passwords do not match</p>
+                        )}
+                        {touched.confirmPassword && !confirmPassword && (
+                          <p className="text-red-500 text-xs mt-1">This field is required</p>
                         )}
                       </div>
 
@@ -695,6 +746,10 @@ const Register: React.FC = () => {
               </form>
             </motion.div>
           </div>
+        </div>
+
+        <div className="text-center py-4 mt-6 mb-4">
+          <p className="text-xs text-gray-400">© {new Date().getFullYear()} Trash-In-N-Out. All rights reserved.</p>
         </div>
       </IonContent>
     </IonPage>

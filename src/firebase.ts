@@ -1,6 +1,7 @@
 import { initializeApp } from "firebase/app"
 import { getFirestore, enableMultiTabIndexedDbPersistence } from "firebase/firestore"
 import { getStorage } from "firebase/storage"
+import { getMessaging, isSupported, type Messaging } from "firebase/messaging"
 // Note: Firebase Auth is not used - app uses custom Firestore-based auth
 // import { getAuth } from "firebase/auth"
 
@@ -22,6 +23,17 @@ const app = initializeApp(firebaseConfig)
 export const firestore = getFirestore(app)
 export const storage = getStorage(app)
 // Note: Custom auth is used instead of Firebase Auth (see AuthContext.tsx)
+
+// Initialize FCM (web only - native uses Capacitor)
+let messaging: Messaging | null = null
+export const getFirebaseMessaging = async (): Promise<Messaging | null> => {
+  if (messaging) return messaging
+  const supported = await isSupported()
+  if (supported) {
+    messaging = getMessaging(app)
+  }
+  return messaging
+}
 
 // Enable offline persistence with better error handling
 const enableOfflineSupport = async () => {

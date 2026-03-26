@@ -12,8 +12,10 @@ import {
 import { useAuth, getUserDataFromStorage } from "../contexts/AuthContext"
 import { firestore } from "../firebase"
 import { collection, query, where, getDocs, doc, updateDoc, orderBy, Timestamp } from "firebase/firestore"
-import { sendNotification } from "../services/notifications"
+import { sendNotification, sendAdminStatusNotification, sendStatusUpdateNotification } from "../services/notifications"
 import { awardPoints } from "../services/rewards"
+import { canJunkshopCompleteRequest } from "../services/limits"
+import { submitRating, hasUserRatedRequest } from "../services/ratings"
 import { motion, AnimatePresence } from "framer-motion"
 
 // SVG Icon Components
@@ -114,7 +116,7 @@ interface MaterialRequest {
   type: string
   description: string
   address: string
-  status: "pending" | "accepted" | "completed"
+  status: "pending" | "accepted" | "completed" | "rejected"
   createdAt: Date
   targetJunkshopId?: string
   targetJunkshopName?: string
@@ -122,6 +124,10 @@ interface MaterialRequest {
     lat: number
     lng: number
   }
+  remarks?: string
+  remarksBy?: string
+  remarksAt?: any
+  fulfillmentMethod?: string
 }
 
 const JunkshopDashboard: React.FC = () => {
@@ -147,10 +153,37 @@ const JunkshopDashboard: React.FC = () => {
   const [selectedRequest, setSelectedRequest] = useState<MaterialRequest | null>(null)
   const [showDetailModal, setShowDetailModal] = useState(false)
   const [actionLoading, setActionLoading] = useState(false)
+  const [showRemarksModal, setShowRemarksModal] = useState(false)
+  const [remarks, setRemarks] = useState("")
+  const [remarksAction, setRemarksAction] = useState<"accept" | "reject">("accept")
+  const [remarksRequestId, setRemarksRequestId] = useState<string>("")
+  const [dailyLimitInfo, setDailyLimitInfo] = useState<{ remaining: number; limit: number }>({ remaining: 10, limit: 10 })
+  const [showRatingModal, setShowRatingModal] = useState(false)
+  const [ratingValue, setRatingValue] = useState(0)
+  const [ratingComment, setRatingComment] = useState("")
+  const [ratingRequestId, setRatingRequestId] = useState("")
+  const [ratingTargetUserId, setRatingTargetUserId] = useState("")
+  const [ratingTargetUserName, setRatingTargetUserName] = useState("")
+  const [ratedRequests, setRatedRequests] = useState<Set<string>>(new Set())
 
   useEffect(() => {
     fetchMaterialRequests()
+    checkDailyLimit()
   }, [])
+
+  useEffect(() => {
+    const checkRated = async () => {
+      if (!userInfo?.uid || materialRequests.length === 0) return
+      const completed = materialRequests.filter((r) => r.status === "completed")
+      const rated = new Set<string>()
+      for (const req of completed) {
+        const alreadyRated = await hasUserRatedRequest(userInfo.uid, req.id)
+        if (alreadyRated) rated.add(req.id)
+      }
+      setRatedRequests(rated)
+    }
+    checkRated()
+  }, [materialRequests, userInfo?.uid])
 
   useEffect(() => {
     applyFilters()
@@ -167,6 +200,12 @@ const JunkshopDashboard: React.FC = () => {
     setToastMessage(message)
     setToastType(type)
     setShowToast(true)
+  }
+
+  const checkDailyLimit = async () => {
+    if (!userInfo?.uid) return
+    const limitInfo = await canJunkshopCompleteRequest(userInfo.uid)
+    setDailyLimitInfo({ remaining: limitInfo.remaining, limit: limitInfo.limit })
   }
 
   const fetchMaterialRequests = useCallback(async () => {
@@ -214,6 +253,9 @@ const JunkshopDashboard: React.FC = () => {
           targetJunkshopId: data.targetJunkshopId,
           targetJunkshopName: data.targetJunkshopName,
           location: data.location ? { lat: data.location.latitude, lng: data.location.longitude } : undefined,
+          remarks: data.remarks,
+          remarksBy: data.remarksBy,
+          remarksAt: data.remarksAt,
         })
       })
 
@@ -231,6 +273,9 @@ const JunkshopDashboard: React.FC = () => {
           targetJunkshopId: data.targetJunkshopId,
           targetJunkshopName: data.targetJunkshopName,
           location: data.location ? { lat: data.location.latitude, lng: data.location.longitude } : undefined,
+          remarks: data.remarks,
+          remarksBy: data.remarksBy,
+          remarksAt: data.remarksAt,
         })
       })
 
@@ -248,6 +293,9 @@ const JunkshopDashboard: React.FC = () => {
           targetJunkshopId: data.targetJunkshopId,
           targetJunkshopName: data.targetJunkshopName,
           location: data.location ? { lat: data.location.latitude, lng: data.location.longitude } : undefined,
+          remarks: data.remarks,
+          remarksBy: data.remarksBy,
+          remarksAt: data.remarksAt,
         })
       })
 
@@ -314,6 +362,21 @@ const JunkshopDashboard: React.FC = () => {
     event.detail.complete()
   }
 
+  const openRemarksModal = (requestId: string, action: "accept" | "reject") => {
+    setRemarksRequestId(requestId)
+    setRemarksAction(action)
+    setRemarks("")
+    setShowRemarksModal(true)
+  }
+
+  const confirmRemarksAction = async () => {
+    if (remarksAction === "accept") {
+      await handleAcceptRequest(remarksRequestId)
+    } else {
+      await handleRejectRequest()
+    }
+  }
+
   const handleAcceptRequest = async (requestId: string) => {
     if (!userInfo) return
 
@@ -326,6 +389,11 @@ const JunkshopDashboard: React.FC = () => {
         acceptedBy: userInfo.uid,
         acceptedByName: userInfo.name,
         acceptedAt: Timestamp.now(),
+        targetJunkshopId: userInfo.uid,
+        targetJunkshopName: userInfo.businessName || userInfo.name || "Junkshop",
+        remarks: remarks || "",
+        remarksBy: userInfo.businessName || userInfo.name || "Junkshop",
+        remarksAt: new Date(),
       })
 
       const foundRequest = materialRequests.find((r) => r.id === requestId)
@@ -337,9 +405,17 @@ const JunkshopDashboard: React.FC = () => {
           type: "status",
           relatedId: requestId,
         })
+
+        await sendAdminStatusNotification(
+          userInfo.name || "Junkshop",
+          "accepted",
+          foundRequest.type,
+          requestId,
+        )
       }
 
       showToastMessage("Request accepted successfully!")
+      setShowRemarksModal(false)
       setShowDetailModal(false)
       fetchMaterialRequests()
     } catch (error) {
@@ -350,11 +426,54 @@ const JunkshopDashboard: React.FC = () => {
     }
   }
 
+  const handleRejectRequest = async () => {
+    if (!remarksRequestId || !userInfo) return
+
+    try {
+      setActionLoading(true)
+
+      const requestRef = doc(firestore, "materialRequests", remarksRequestId)
+      await updateDoc(requestRef, {
+        status: "rejected",
+        remarks: remarks,
+        remarksBy: userInfo.businessName || userInfo.name || "Junkshop",
+        remarksAt: new Date(),
+      })
+
+      const foundRequest = materialRequests.find((r) => r.id === remarksRequestId)
+      if (foundRequest) {
+        await sendStatusUpdateNotification(
+          foundRequest.userId,
+          "rejected",
+          userInfo.businessName || userInfo.name || "Junkshop",
+          foundRequest.type,
+          remarksRequestId,
+        )
+      }
+
+      showToastMessage("Request rejected")
+      setShowRemarksModal(false)
+      setShowDetailModal(false)
+      fetchMaterialRequests()
+    } catch (error) {
+      console.error("Error rejecting request:", error)
+      showToastMessage("Error rejecting request", "error")
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
   const handleCompleteRequest = async (requestId: string) => {
     if (!userInfo) return
 
     try {
       setActionLoading(true)
+
+      const limitInfo = await canJunkshopCompleteRequest(userInfo.uid)
+      if (!limitInfo.allowed) {
+        showToastMessage(`Daily completion limit reached (${limitInfo.limit} per day)`, "error")
+        return
+      }
 
       const requestRef = doc(firestore, "materialRequests", requestId)
       await updateDoc(requestRef, {
@@ -375,11 +494,19 @@ const JunkshopDashboard: React.FC = () => {
           type: "status",
           relatedId: requestId,
         })
+
+        await sendAdminStatusNotification(
+          userInfo.name || "Junkshop",
+          "completed",
+          foundRequest.type,
+          requestId,
+        )
       }
 
       showToastMessage("Request completed successfully!")
       setShowDetailModal(false)
       fetchMaterialRequests()
+      checkDailyLimit()
     } catch (error) {
       console.error("Error completing request", error)
       showToastMessage("Error completing request", "error")
@@ -475,6 +602,12 @@ const JunkshopDashboard: React.FC = () => {
 
         {/* Stats Cards */}
         <div className="px-4 mt-4">
+          {/* Daily Limit Banner */}
+          <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 mb-4 flex items-center justify-between">
+            <span className="text-sm text-amber-700">Daily Completions</span>
+            <span className="text-sm font-bold text-amber-700">{dailyLimitInfo.remaining}/{dailyLimitInfo.limit} remaining</span>
+          </div>
+
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
@@ -657,6 +790,11 @@ const JunkshopDashboard: React.FC = () => {
                               </span>
                             </div>
                           )}
+                          {request.remarks && (
+                            <div className="mt-2 p-2 bg-gray-50 rounded-lg">
+                              <p className="text-xs text-gray-500">Remarks: <span className="text-gray-700">{request.remarks}</span></p>
+                            </div>
+                          )}
                         </div>
                         <IconChevronForward className="w-5 h-5 text-gray-400 flex-shrink-0" />
                       </div>
@@ -684,128 +822,289 @@ const JunkshopDashboard: React.FC = () => {
                 exit={{ scale: 0.9, opacity: 0 }}
                 transition={{ type: "spring", damping: 25 }}
                 onClick={(e) => e.stopPropagation()}
-                className="bg-white rounded-3xl p-6 w-full max-w-md shadow-2xl max-h-[90vh] overflow-y-auto"
+                className="bg-white rounded-2xl p-4 w-full max-w-sm shadow-2xl max-h-[75vh] overflow-y-auto"
               >
                 {/* Close button */}
-                <div className="flex justify-end mb-2">
+                <div className="flex justify-end mb-1">
                   <button
                     onClick={() => setShowDetailModal(false)}
-                    className="p-2 hover:bg-gray-100 rounded-full transition-colors"
+                    className="p-1.5 hover:bg-gray-100 rounded-full transition-colors"
                   >
-                    <IconClose className="w-5 h-5 text-gray-500" />
+                    <IconClose className="w-4 h-4 text-gray-500" />
                   </button>
                 </div>
 
-                <div className="flex items-start gap-4 mb-6">
-                  <div className="w-16 h-16 bg-gradient-to-br from-orange-100 to-amber-100 rounded-2xl flex items-center justify-center text-orange-600">
-                    <IconRecycle className="w-8 h-8" />
+                <div className="flex items-start gap-3 mb-4">
+                  <div className="w-12 h-12 bg-gradient-to-br from-orange-100 to-amber-100 rounded-xl flex items-center justify-center text-orange-600 flex-shrink-0">
+                    <IconRecycle className="w-6 h-6" />
                   </div>
                   <div className="flex-1">
-                    <div className="flex items-center gap-2 mb-1">
-                      <h2 className="text-xl font-bold text-gray-800 capitalize">{selectedRequest.type}</h2>
+                    <div className="flex items-center gap-2 mb-0.5">
+                      <h2 className="text-lg font-bold text-gray-800 capitalize">{selectedRequest.type}</h2>
                       <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${getStatusColor(selectedRequest.status)}`}>
                         {selectedRequest.status}
                       </span>
                     </div>
-                    <p className="text-gray-600">{selectedRequest.description}</p>
+                    <p className="text-sm text-gray-600">{selectedRequest.description}</p>
+                    {selectedRequest.fulfillmentMethod && (
+                      <span className="inline-block mt-1 px-2 py-0.5 rounded-full text-xs font-medium bg-violet-100 text-violet-700 capitalize">
+                        {selectedRequest.fulfillmentMethod}
+                      </span>
+                    )}
                   </div>
                 </div>
 
-                <div className="space-y-3 mb-6">
-                  <div className="flex items-center gap-3 p-3 bg-gray-50 rounded-xl">
-                    <div className="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center text-blue-600">
-                      <IconPerson className="w-5 h-5" />
+                <div className="space-y-2 mb-4">
+                  <div className="flex items-center gap-2 p-2.5 bg-gray-50 rounded-lg">
+                    <div className="w-8 h-8 bg-blue-100 rounded-full flex items-center justify-center text-blue-600 flex-shrink-0">
+                      <IconPerson className="w-4 h-4" />
                     </div>
                     <div>
-                      <p className="text-xs text-gray-500">Requested by</p>
-                      <p className="font-medium text-gray-700">{selectedRequest.userName}</p>
+                      <p className="text-[10px] text-gray-500">Requested by</p>
+                      <p className="text-sm font-medium text-gray-700">{selectedRequest.userName}</p>
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-3 p-3 bg-gray-50 rounded-xl">
-                    <div className="w-10 h-10 bg-green-100 rounded-full flex items-center justify-center text-green-600">
-                      <IconLocation className="w-5 h-5" />
+                  <div className="flex items-center gap-2 p-2.5 bg-gray-50 rounded-lg">
+                    <div className="w-8 h-8 bg-green-100 rounded-full flex items-center justify-center text-green-600 flex-shrink-0">
+                      <IconLocation className="w-4 h-4" />
                     </div>
                     <div className="flex-1">
-                      <p className="text-xs text-gray-500">Pickup Address</p>
-                      <p className="font-medium text-gray-700">{selectedRequest.address}</p>
+                      <p className="text-[10px] text-gray-500">Pickup Address</p>
+                      <p className="text-sm font-medium text-gray-700">{selectedRequest.address}</p>
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-3 p-3 bg-gray-50 rounded-xl">
-                    <div className="w-10 h-10 bg-purple-100 rounded-full flex items-center justify-center text-purple-600">
-                      <IconCalendar className="w-5 h-5" />
+                  <div className="flex items-center gap-2 p-2.5 bg-gray-50 rounded-lg">
+                    <div className="w-8 h-8 bg-purple-100 rounded-full flex items-center justify-center text-purple-600 flex-shrink-0">
+                      <IconCalendar className="w-4 h-4" />
                     </div>
                     <div>
-                      <p className="text-xs text-gray-500">Submitted</p>
-                      <p className="font-medium text-gray-700">{selectedRequest.createdAt.toLocaleDateString()} at {selectedRequest.createdAt.toLocaleTimeString()}</p>
+                      <p className="text-[10px] text-gray-500">Submitted</p>
+                      <p className="text-sm font-medium text-gray-700">{selectedRequest.createdAt.toLocaleDateString()} at {selectedRequest.createdAt.toLocaleTimeString()}</p>
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-3 p-3 bg-gradient-to-r from-amber-50 to-orange-50 rounded-xl border border-orange-100">
-                    <div className="w-10 h-10 bg-orange-100 rounded-full flex items-center justify-center text-orange-600">
-                      <IconTrophy className="w-5 h-5" />
+                  <div className="flex items-center gap-2 p-2.5 bg-gradient-to-r from-amber-50 to-orange-50 rounded-lg border border-orange-100">
+                    <div className="w-8 h-8 bg-orange-100 rounded-full flex items-center justify-center text-orange-600 flex-shrink-0">
+                      <IconTrophy className="w-4 h-4" />
                     </div>
                     <div>
-                      <p className="text-xs text-gray-500">Points you'll earn</p>
-                      <p className="font-bold text-orange-600">+{Math.floor(getPointsForMaterial(selectedRequest.type) / 2)} points</p>
+                      <p className="text-[10px] text-gray-500">Points you'll earn</p>
+                      <p className="text-sm font-bold text-orange-600">+{Math.floor(getPointsForMaterial(selectedRequest.type) / 2)} points</p>
                     </div>
                   </div>
+
+                  {selectedRequest.remarks && (
+                    <div className="p-2 bg-gray-50 rounded-lg">
+                      <p className="text-xs text-gray-500">Remarks: <span className="text-gray-700">{selectedRequest.remarks}</span></p>
+                    </div>
+                  )}
                 </div>
 
                 {/* Action Buttons Section */}
-                <div className="space-y-3">
-                  {/* View Location Button - always shown if location exists */}
+                <div className="space-y-2">
+                  {/* View Location Button */}
                   {selectedRequest.location && (
                     <button
                       onClick={() => {
                         const { lat, lng } = selectedRequest.location!
                         window.open(`https://www.google.com/maps?q=${lat},${lng}`, "_blank")
                       }}
-                      className="w-full py-3 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl font-semibold transition-colors flex items-center justify-center gap-2"
+                      className="w-full py-2.5 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl font-semibold transition-colors flex items-center justify-center gap-2 text-sm"
                     >
-                      <IconLocation className="w-5 h-5" />
+                      <IconLocation className="w-4 h-4" />
                       View on Map
                     </button>
                   )}
 
-                  {/* Status-based action button */}
                   {selectedRequest.status === "pending" && (
-                    <button
-                      onClick={() => handleAcceptRequest(selectedRequest.id)}
-                      disabled={actionLoading}
-                      className="w-full py-3.5 bg-gradient-to-r from-blue-500 to-indigo-500 text-white rounded-xl font-semibold shadow-lg disabled:opacity-50 transition-all"
-                    >
-                      {actionLoading ? "Processing..." : "Accept Request"}
-                    </button>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => openRemarksModal(selectedRequest.id, "reject")}
+                        disabled={actionLoading}
+                        className="flex-1 py-2.5 bg-gradient-to-r from-red-500 to-rose-500 text-white rounded-xl font-semibold shadow-lg disabled:opacity-50 transition-all text-sm"
+                      >
+                        Reject
+                      </button>
+                      <button
+                        onClick={() => openRemarksModal(selectedRequest.id, "accept")}
+                        disabled={actionLoading}
+                        className="flex-1 py-2.5 bg-gradient-to-r from-blue-500 to-indigo-500 text-white rounded-xl font-semibold shadow-lg disabled:opacity-50 transition-all text-sm"
+                      >
+                        Accept
+                      </button>
+                    </div>
                   )}
 
                   {selectedRequest.status === "accepted" && (
                     <button
                       onClick={() => handleCompleteRequest(selectedRequest.id)}
                       disabled={actionLoading}
-                      className="w-full py-3.5 bg-gradient-to-r from-green-500 to-emerald-500 text-white rounded-xl font-semibold shadow-lg disabled:opacity-50 transition-all"
+                      className="w-full py-2.5 bg-gradient-to-r from-green-500 to-emerald-500 text-white rounded-xl font-semibold shadow-lg disabled:opacity-50 transition-all text-sm"
                     >
                       {actionLoading ? "Processing..." : "Mark as Completed"}
                     </button>
                   )}
 
                   {selectedRequest.status === "completed" && (
-                    <div className="text-center py-4 bg-green-50 rounded-xl">
-                      <div className="w-12 h-12 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-2">
-                        <IconCheckmarkDone className="w-6 h-6 text-green-600" />
+                    <div className="space-y-2">
+                      <div className="text-center py-3 bg-green-50 rounded-xl">
+                        <div className="w-10 h-10 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-1">
+                          <IconCheckmarkDone className="w-5 h-5 text-green-600" />
+                        </div>
+                        <p className="text-sm font-semibold text-green-600">Request Completed</p>
                       </div>
-                      <p className="font-semibold text-green-600">Request Completed</p>
-                      <p className="text-xs text-gray-500 mt-1">This request has been successfully completed</p>
+                      {!ratedRequests.has(selectedRequest.id) ? (
+                        <button
+                          onClick={() => {
+                            setRatingRequestId(selectedRequest.id)
+                            setRatingTargetUserId(selectedRequest.userId)
+                            setRatingTargetUserName(selectedRequest.userName)
+                            setRatingValue(0)
+                            setRatingComment("")
+                            setShowRatingModal(true)
+                          }}
+                          className="w-full py-2.5 bg-yellow-50 text-yellow-700 border border-yellow-200 rounded-xl text-sm font-medium flex items-center justify-center gap-1"
+                        >
+                          ⭐ Rate Resident
+                        </button>
+                      ) : (
+                        <div className="text-center text-xs text-gray-400">✓ Rated</div>
+                      )}
                     </div>
                   )}
 
-                  {/* Cancel/Close button */}
                   <button
                     onClick={() => setShowDetailModal(false)}
-                    className="w-full py-3 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl font-semibold transition-colors"
+                    className="w-full py-2.5 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl font-semibold transition-colors text-sm"
                   >
                     {selectedRequest.status === "completed" ? "Close" : "Cancel"}
+                  </button>
+                </div>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Remarks Modal */}
+        <AnimatePresence>
+          {showRemarksModal && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+              onClick={() => setShowRemarksModal(false)}
+            >
+              <motion.div
+                initial={{ scale: 0.9, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.9, opacity: 0 }}
+                transition={{ type: "spring", damping: 25 }}
+                onClick={(e) => e.stopPropagation()}
+                className="bg-white rounded-3xl p-6 w-full max-w-sm shadow-2xl"
+              >
+                <h3 className="text-lg font-bold text-gray-800 mb-2">
+                  {remarksAction === "accept" ? "Accept Request" : "Reject Request"}
+                </h3>
+                <p className="text-sm text-gray-500 mb-4">
+                  {remarksAction === "accept"
+                    ? "Add remarks for accepting this request (optional)."
+                    : "Please provide a reason for rejecting this request."}
+                </p>
+                <textarea
+                  value={remarks}
+                  onChange={(e) => setRemarks(e.target.value)}
+                  placeholder={remarksAction === "accept" ? "Add remarks (optional)..." : "Reason for rejection..."}
+                  rows={3}
+                  className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:ring-2 focus:ring-purple-500/50 resize-none mb-4"
+                />
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => setShowRemarksModal(false)}
+                    className="flex-1 py-3 bg-gray-100 text-gray-700 rounded-xl font-semibold"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={confirmRemarksAction}
+                    disabled={actionLoading}
+                    className={`flex-1 py-3 rounded-xl font-semibold text-white disabled:opacity-50 ${
+                      remarksAction === "accept"
+                        ? "bg-gradient-to-r from-emerald-500 to-green-500"
+                        : "bg-gradient-to-r from-red-500 to-rose-500"
+                    }`}
+                  >
+                    {actionLoading ? "Processing..." : remarksAction === "accept" ? "Accept" : "Reject"}
+                  </button>
+                </div>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Rating Modal */}
+        <AnimatePresence>
+          {showRatingModal && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+              onClick={() => setShowRatingModal(false)}
+            >
+              <motion.div
+                initial={{ scale: 0.9, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.9, opacity: 0 }}
+                className="bg-white rounded-3xl p-6 w-full max-w-sm shadow-2xl"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <h3 className="text-lg font-bold text-gray-800 mb-2 text-center">Rate Resident</h3>
+                <p className="text-sm text-gray-500 text-center mb-4">How was your experience with {ratingTargetUserName}?</p>
+                <div className="flex justify-center gap-2 mb-4">
+                  {[1, 2, 3, 4, 5].map((star) => (
+                    <button key={star} onClick={() => setRatingValue(star)} className="p-1">
+                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" className={`w-10 h-10 transition-colors ${star <= ratingValue ? "text-yellow-400" : "text-gray-300"}`} fill="currentColor">
+                        <path d="M394 480a16 16 0 01-9.39-3L256 383.76 127.39 477a16 16 0 01-24.55-18.08L153 310.35 23 221.2A16 16 0 0132 192h127.78l48.72-148.24a16 16 0 0130.5 0L288.22 192H416a16 16 0 019.05 28.8L295 310.35 345.16 459a16 16 0 01-15.16 21z"/>
+                      </svg>
+                    </button>
+                  ))}
+                </div>
+                <textarea
+                  value={ratingComment}
+                  onChange={(e) => setRatingComment(e.target.value)}
+                  placeholder="Add a comment (optional)..."
+                  rows={3}
+                  className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:ring-2 focus:ring-yellow-500/50 resize-none mb-4"
+                />
+                <div className="flex gap-3">
+                  <button onClick={() => setShowRatingModal(false)} className="flex-1 py-3 bg-gray-100 text-gray-700 rounded-xl font-semibold">Cancel</button>
+                  <button
+                    onClick={async () => {
+                      if (ratingValue === 0) return
+                      try {
+                        await submitRating({
+                          fromUserId: userInfo!.uid,
+                          fromUserName: userInfo!.name || userInfo!.businessName || "Junkshop",
+                          toUserId: ratingTargetUserId,
+                          toUserName: ratingTargetUserName,
+                          requestId: ratingRequestId,
+                          rating: ratingValue,
+                          comment: ratingComment,
+                        })
+                        setShowRatingModal(false)
+                        setRatedRequests(prev => new Set([...prev, ratingRequestId]))
+                        showToastMessage("Rating submitted!", "success")
+                      } catch (error: any) {
+                        showToastMessage(error.message || "Error submitting rating", "error")
+                      }
+                    }}
+                    disabled={ratingValue === 0}
+                    className="flex-1 py-3 bg-gradient-to-r from-yellow-400 to-amber-500 text-white rounded-xl font-semibold shadow-lg disabled:opacity-50"
+                  >
+                    Submit Rating
                   </button>
                 </div>
               </motion.div>
@@ -848,6 +1147,10 @@ const JunkshopDashboard: React.FC = () => {
             </div>
           </div>
         )}
+
+        <div className="text-center py-4 mt-6 mb-4">
+          <p className="text-xs text-gray-400">© {new Date().getFullYear()} Trash-In-N-Out. All rights reserved.</p>
+        </div>
       </IonContent>
     </IonPage>
   )

@@ -1,10 +1,9 @@
 "use client"
 
 import type React from "react"
-import { Redirect, Route, useLocation, useHistory } from "react-router-dom"
+import { Redirect, Route, Switch, useLocation, useHistory } from "react-router-dom"
 import {
   IonApp,
-  IonRouterOutlet,
   setupIonicReact,
 } from "@ionic/react"
 import { IonReactRouter } from "@ionic/react-router"
@@ -41,7 +40,9 @@ import Chat from "./pages/Chat"
 import AdminDashboard from "./pages/AdminDashboard"
 import { AuthProvider, useAuth, getUserDataFromStorage } from "./contexts/AuthContext"
 import PrivateRoute from "./components/PrivateRoute"
+import ProfileCompletionCheck from "./components/ProfileCompletionCheck"
 import RoleRoute from "./components/RoleRoute"
+import { initPushNotifications, listenForNewNotifications, listenForNewChatMessages } from "./services/pushNotifications"
 import { useState, useEffect } from "react"
 import { collection, query, where, onSnapshot } from "firebase/firestore"
 import { firestore } from "./firebase"
@@ -328,6 +329,20 @@ const AppContent: React.FC = () => {
     }
   }, [networkStatus.showToast])
 
+  // Initialize push notifications and listen for new ones
+  useEffect(() => {
+    if (userInfo?.uid) {
+      initPushNotifications(userInfo.uid)
+
+      const unsubNotifications = listenForNewNotifications(userInfo.uid)
+      const unsubChat = listenForNewChatMessages(userInfo.uid)
+      return () => {
+        unsubNotifications()
+        unsubChat()
+      }
+    }
+  }, [userInfo?.uid])
+
   // Monitor unread notifications
   useEffect(() => {
     if (!userInfo?.uid) return
@@ -337,7 +352,6 @@ const AppContent: React.FC = () => {
       notificationsRef,
       where("userId", "==", userInfo.uid),
       where("read", "==", false),
-      where("deleted", "==", false),
     )
 
     const unsubscribe = onSnapshot(
@@ -353,17 +367,22 @@ const AppContent: React.FC = () => {
     return () => unsubscribe()
   }, [userInfo?.uid])
 
-  // Monitor unread messages
+  // Monitor unread chat messages from chatRooms
   useEffect(() => {
     if (!userInfo?.uid) return
 
-    const messagesRef = collection(firestore, "messages")
-    const q = query(messagesRef, where("recipientId", "==", userInfo.uid), where("read", "==", false))
+    const roomsRef = collection(firestore, "chatRooms")
+    const q = query(roomsRef, where("participants", "array-contains", userInfo.uid))
 
     const unsubscribe = onSnapshot(
       q,
       (snapshot) => {
-        setUnreadMessages(snapshot.size)
+        let total = 0
+        snapshot.forEach((doc) => {
+          const data = doc.data()
+          total += (data.unreadCount?.[userInfo.uid!] || 0)
+        })
+        setUnreadMessages(total)
       },
       (error) => {
         console.error("Error fetching unread messages count", error)
@@ -405,9 +424,10 @@ const AppContent: React.FC = () => {
   }
 
   return (
+    <ProfileCompletionCheck>
     <>
       <div className="pb-16">
-        <IonRouterOutlet>
+        <Switch>
           <Route exact path="/app/home">
             <Home />
           </Route>
@@ -456,7 +476,7 @@ const AppContent: React.FC = () => {
           <Route exact path="/app">
             <Redirect to="/app/home" />
           </Route>
-        </IonRouterOutlet>
+        </Switch>
       </div>
 
       {/* Custom Tab Bar */}
@@ -489,6 +509,7 @@ const AppContent: React.FC = () => {
         </div>
       )}
     </>
+    </ProfileCompletionCheck>
   )
 }
 

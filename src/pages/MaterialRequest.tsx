@@ -1,7 +1,7 @@
 "use client"
 
 import type React from "react"
-import { useState, useRef } from "react"
+import { useState, useRef, useEffect } from "react"
 import {
   IonContent,
   IonHeader,
@@ -22,6 +22,7 @@ import { useHistory } from "react-router"
 import { collection, addDoc, serverTimestamp } from "firebase/firestore"
 import { firestore } from "../firebase"
 import { motion } from "framer-motion"
+import { canResidentCreateRequest } from "../services/limits"
 
 // SVG Icon Components (avoiding Stencil watcher issues)
 const IconNewspaper: React.FC<{ className?: string }> = ({ className }) => (
@@ -107,14 +108,27 @@ const MaterialRequest: React.FC = () => {
   const history = useHistory()
   const [type, setType] = useState("")
   const [description, setDescription] = useState("")
+  const [fulfillmentMethod, setFulfillmentMethod] = useState("")
   const [loading, setLoading] = useState(false)
   const [showAlert, setShowAlert] = useState(false)
   const [alertMessage, setAlertMessage] = useState("")
   const [alertHeader, setAlertHeader] = useState("Alert")
+  const [touched, setTouched] = useState<{[key: string]: boolean}>({})
+  const [dailyLimitInfo, setDailyLimitInfo] = useState<{ remaining: number; limit: number }>({ remaining: 5, limit: 5 })
 
   // Refs for direct DOM access
   const typeSelectRef = useRef<HTMLIonSelectElement>(null)
   const descriptionTextareaRef = useRef<HTMLIonTextareaElement>(null)
+
+  useEffect(() => {
+    const checkLimit = async () => {
+      if (userData?.uid) {
+        const info = await canResidentCreateRequest(userData.uid)
+        setDailyLimitInfo({ remaining: info.remaining, limit: info.limit })
+      }
+    }
+    checkLimit()
+  }, [userData?.uid])
 
   const materialTypes = [
     { value: "paper", label: "Paper & Cardboard", color: "bg-amber-100 text-amber-600" },
@@ -130,11 +144,22 @@ const MaterialRequest: React.FC = () => {
     const typeValue = (typeSelectRef.current?.value as string) || type
     const descriptionValue = (descriptionTextareaRef.current?.value as string) || description
 
-    if (!typeValue || !descriptionValue) {
+    if (!typeValue || !descriptionValue || !fulfillmentMethod) {
+      setTouched({ type: true, fulfillmentMethod: true, description: true })
       setAlertHeader("Missing Information")
-      setAlertMessage("Please select a material type and add a description.")
+      setAlertMessage("Please select a material type, fulfillment method, and add a description.")
       setShowAlert(true)
       return
+    }
+
+    if (userData?.uid) {
+      const limitInfo = await canResidentCreateRequest(userData.uid)
+      if (!limitInfo.allowed) {
+        setAlertHeader("Daily Limit Reached")
+        setAlertMessage(`You can only submit ${limitInfo.limit} requests per day. Please try again tomorrow.`)
+        setShowAlert(true)
+        return
+      }
     }
 
     try {
@@ -144,6 +169,7 @@ const MaterialRequest: React.FC = () => {
         userName: userData?.name,
         type: typeValue,
         description: descriptionValue,
+        fulfillmentMethod,
         status: "pending",
         createdAt: serverTimestamp(),
       })
@@ -152,6 +178,11 @@ const MaterialRequest: React.FC = () => {
       setShowAlert(true)
       setType("")
       setDescription("")
+      setFulfillmentMethod("")
+      if (userData?.uid) {
+        const info = await canResidentCreateRequest(userData.uid)
+        setDailyLimitInfo({ remaining: info.remaining, limit: info.limit })
+      }
       // Navigate after alert is dismissed
     } catch (error: any) {
       console.error("Error submitting request:", error)
@@ -206,6 +237,12 @@ const MaterialRequest: React.FC = () => {
           </p>
         </motion.div>
 
+        {/* Daily Limit Banner */}
+        <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 mb-4 flex items-center justify-between">
+          <span className="text-sm text-blue-700">Daily Requests</span>
+          <span className="text-sm font-bold text-blue-700">{dailyLimitInfo.remaining}/{dailyLimitInfo.limit} remaining</span>
+        </div>
+
         {/* Material Type Selection */}
         <motion.div
           initial={{ opacity: 0, y: 20 }}
@@ -213,7 +250,7 @@ const MaterialRequest: React.FC = () => {
           transition={{ delay: 0.1 }}
         >
           <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3">Select Material Type</h3>
-          <div className="grid grid-cols-3 gap-3 mb-6">
+          <div className={`grid grid-cols-3 gap-3 mb-6 ${touched.type && !type ? 'ring-2 ring-red-300 rounded-xl p-1' : ''}`}>
             {materialTypes.map((material, index) => (
               <motion.button
                 key={material.value}
@@ -225,7 +262,9 @@ const MaterialRequest: React.FC = () => {
                 className={`p-4 rounded-xl border-2 transition-all ${
                   type === material.value 
                     ? "border-green-500 bg-green-50 shadow-md" 
-                    : "border-gray-200 bg-white hover:border-gray-300"
+                    : touched.type && !type
+                      ? "border-red-300 bg-white hover:border-red-400"
+                      : "border-gray-200 bg-white hover:border-gray-300"
                 }`}
               >
                 <div className={`w-10 h-10 rounded-full mx-auto mb-2 flex items-center justify-center ${material.color}`}>
@@ -237,6 +276,41 @@ const MaterialRequest: React.FC = () => {
               </motion.button>
             ))}
           </div>
+          {touched.type && !type && <p className="text-red-500 text-xs mt-1 mb-2">Please select a material type</p>}
+        </motion.div>
+
+        {/* Fulfillment Method Selection */}
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.15 }}>
+          <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3">Fulfillment Method</h3>
+          <div className={`grid grid-cols-3 gap-3 mb-6 ${touched.fulfillmentMethod && !fulfillmentMethod ? 'ring-2 ring-red-300 rounded-xl p-1' : ''}`}>
+            {[
+              { value: "pickup", label: "Pickup", icon: "🚛" },
+              { value: "delivery", label: "Delivery", icon: "📦" },
+              { value: "other", label: "Other", icon: "📋" },
+            ].map((method, index) => (
+              <motion.button
+                key={method.value}
+                initial={{ opacity: 0, scale: 0.9 }}
+                animate={{ opacity: 1, scale: 1 }}
+                transition={{ delay: index * 0.05 }}
+                type="button"
+                onClick={() => setFulfillmentMethod(method.value)}
+                className={`p-4 rounded-xl border-2 transition-all ${
+                  fulfillmentMethod === method.value
+                    ? "border-green-500 bg-green-50 shadow-md"
+                    : touched.fulfillmentMethod && !fulfillmentMethod
+                      ? "border-red-300 bg-white hover:border-red-400"
+                      : "border-gray-200 bg-white hover:border-gray-300"
+                }`}
+              >
+                <div className="text-2xl text-center mb-2">{method.icon}</div>
+                <p className={`text-xs font-medium text-center ${fulfillmentMethod === method.value ? "text-green-700" : "text-gray-600"}`}>
+                  {method.label}
+                </p>
+              </motion.button>
+            ))}
+          </div>
+          {touched.fulfillmentMethod && !fulfillmentMethod && <p className="text-red-500 text-xs mt-1 mb-2">Please select a fulfillment method</p>}
         </motion.div>
 
         {/* Hidden Select for form value */}
@@ -273,8 +347,9 @@ const MaterialRequest: React.FC = () => {
                 debounce={0}
                 placeholder="Describe your materials (e.g., 5kg of old newspapers, 10 plastic bottles, etc.)"
                 rows={4}
-                className="bg-gray-50 rounded-lg p-2"
+                className={`bg-gray-50 rounded-lg p-2 ${touched.description && !description ? 'border-2 border-red-400' : ''}`}
               />
+              {touched.description && !description && <p className="text-red-500 text-xs mt-1">Description is required</p>}
             </IonCardContent>
           </IonCard>
         </motion.div>
@@ -293,6 +368,12 @@ const MaterialRequest: React.FC = () => {
               </div>
               <span className="font-medium text-gray-800">{selectedMaterial?.label}</span>
             </div>
+            {fulfillmentMethod && (
+              <div className="mt-3 pt-3 border-t border-gray-200">
+                <p className="text-sm text-gray-500 mb-1">Fulfillment Method</p>
+                <span className="font-medium text-gray-800 capitalize">{fulfillmentMethod}</span>
+              </div>
+            )}
           </motion.div>
         )}
 
@@ -305,7 +386,7 @@ const MaterialRequest: React.FC = () => {
           <IonButton 
             expand="block" 
             onClick={handleSubmit} 
-            disabled={loading || !type}
+            disabled={loading}
             className="font-semibold rounded-xl h-12"
             color="success"
           >

@@ -44,8 +44,10 @@ const Login: React.FC = () => {
   const [showToast, setShowToast] = useState(false)
   const [toastMessage, setToastMessage] = useState("")
   const [toastColor, setToastColor] = useState<"danger" | "success" | "warning">("danger")
+  const [touched, setTouched] = useState<{[key: string]: boolean}>({})
   const { login } = useAuth()
   const history = useHistory()
+  const markTouched = (field: string) => setTouched(prev => ({ ...prev, [field]: true }))
 
   // Setup modal states
   const [showSetupModal, setShowSetupModal] = useState(false)
@@ -73,6 +75,7 @@ const Login: React.FC = () => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+    setTouched({ email: true, password: true })
 
     try {
       setError("")
@@ -251,10 +254,12 @@ const Login: React.FC = () => {
                       value={email}
                       placeholder="you@example.com"
                       onChange={(e) => setEmail(e.target.value)}
-                      className="w-full pl-12 pr-4 py-4 bg-white border-2 border-gray-200 rounded-xl text-gray-700 placeholder-gray-400 focus:border-green-500 focus:ring-4 focus:ring-green-100 transition-all outline-none"
+                      onBlur={() => markTouched('email')}
+                      className={`w-full pl-12 pr-4 py-4 bg-white border-2 rounded-xl text-gray-700 placeholder-gray-400 focus:border-green-500 focus:ring-4 focus:ring-green-100 transition-all outline-none ${touched.email && !email ? 'border-red-500' : 'border-gray-200'}`}
                       required
                     />
                   </div>
+                  {touched.email && !email && <p className="text-red-500 text-xs mt-1">This field is required</p>}
                 </div>
 
                 {/* Password Input */}
@@ -269,7 +274,8 @@ const Login: React.FC = () => {
                       value={password}
                       placeholder="Enter your password"
                       onChange={(e) => setPassword(e.target.value)}
-                      className="w-full pl-12 pr-12 py-4 bg-white border-2 border-gray-200 rounded-xl text-gray-700 placeholder-gray-400 focus:border-green-500 focus:ring-4 focus:ring-green-100 transition-all outline-none"
+                      onBlur={() => markTouched('password')}
+                      className={`w-full pl-12 pr-12 py-4 bg-white border-2 rounded-xl text-gray-700 placeholder-gray-400 focus:border-green-500 focus:ring-4 focus:ring-green-100 transition-all outline-none ${touched.password && !password ? 'border-red-500' : 'border-gray-200'}`}
                       required
                     />
                     <button
@@ -289,6 +295,7 @@ const Login: React.FC = () => {
                       )}
                     </button>
                   </div>
+                  {touched.password && !password && <p className="text-red-500 text-xs mt-1">This field is required</p>}
                 </div>
 
                 {/* Remember & Forgot */}
@@ -627,6 +634,10 @@ const Login: React.FC = () => {
             </div>
           </motion.div>
         )}
+
+        <div className="text-center py-4 mt-6 mb-4">
+          <p className="text-xs text-gray-400">© {new Date().getFullYear()} Trash-In-N-Out. All rights reserved.</p>
+        </div>
       </IonContent>
     </IonPage>
   )

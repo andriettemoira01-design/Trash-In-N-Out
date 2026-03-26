@@ -434,26 +434,26 @@ const Notifications: React.FC = () => {
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-end justify-center z-50"
+              className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4"
               onClick={() => setShowDetailModal(false)}
             >
               <motion.div
-                initial={{ y: "100%" }}
-                animate={{ y: 0 }}
-                exit={{ y: "100%" }}
+                initial={{ scale: 0.95, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.95, opacity: 0 }}
                 transition={{ type: "spring", damping: 25 }}
                 onClick={(e) => e.stopPropagation()}
-                className="bg-white rounded-t-3xl p-6 w-full max-w-lg shadow-2xl max-h-[80vh] overflow-y-auto"
+                className="bg-white rounded-2xl p-5 w-full max-w-md shadow-2xl max-h-[70vh] overflow-y-auto"
               >
-                <div className="w-12 h-1.5 bg-gray-300 rounded-full mx-auto mb-6"></div>
+                <div className="w-10 h-1 bg-gray-300 rounded-full mx-auto mb-4"></div>
                 
-                <div className="flex items-start gap-4 mb-6">
-                  <div className={`w-14 h-14 rounded-xl bg-gradient-to-br ${getNotificationColor(selectedNotification.type)} flex items-center justify-center text-white shadow-lg flex-shrink-0`}>
+                <div className="flex items-start gap-3 mb-4">
+                  <div className={`w-12 h-12 rounded-xl bg-gradient-to-br ${getNotificationColor(selectedNotification.type)} flex items-center justify-center text-white shadow-lg flex-shrink-0`}>
                     {getNotificationIcon(selectedNotification.type)}
                   </div>
                   <div className="flex-1">
-                    <h2 className="text-xl font-bold text-gray-800">{selectedNotification.title}</h2>
-                    <p className="text-sm text-gray-500 mt-1">
+                    <h2 className="text-lg font-bold text-gray-800">{selectedNotification.title}</h2>
+                    <p className="text-xs text-gray-500 mt-1">
                       {selectedNotification.createdAt.toLocaleDateString('en-US', {
                         weekday: 'long',
                         month: 'long',
@@ -465,13 +465,13 @@ const Notifications: React.FC = () => {
                   </div>
                 </div>
 
-                <div className="bg-gray-50 rounded-xl p-4 mb-6">
-                  <p className="text-gray-700 leading-relaxed">{selectedNotification.message}</p>
+                <div className="bg-gray-50 rounded-xl p-4 mb-4">
+                  <p className="text-gray-700 text-sm leading-relaxed">{selectedNotification.message}</p>
                 </div>
 
                 <button
                   onClick={() => setShowDetailModal(false)}
-                  className="w-full py-3 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl font-semibold transition-colors"
+                  className="w-full py-2.5 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl font-semibold transition-colors text-sm"
                 >
                   Close
                 </button>
