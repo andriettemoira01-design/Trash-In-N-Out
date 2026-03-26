@@ -2054,7 +2054,7 @@ const AdminDashboard: React.FC = () => {
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-start justify-center z-[9999] p-4 pt-8 pb-20 overflow-y-auto"
+              className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[9999] p-4"
               onClick={() => setShowUserModal(false)}
             >
               <motion.div
@@ -2063,11 +2063,11 @@ const AdminDashboard: React.FC = () => {
                 exit={{ scale: 0.9, opacity: 0 }}
                 transition={{ type: "spring", damping: 25 }}
                 onClick={(e) => e.stopPropagation()}
-                className="bg-white rounded-3xl p-6 w-full max-w-lg shadow-2xl my-auto"
+                className="bg-white rounded-3xl p-6 w-full max-w-lg shadow-2xl max-h-[85vh] overflow-y-auto"
               >
-                <h2 className="text-xl font-bold text-gray-800 mb-4">{currentUser.id ? "Edit" : "Add"} User</h2>
+                <h2 className="text-xl font-bold text-gray-800 mb-3">{currentUser.id ? "Edit" : "Add"} User</h2>
 
-                <div className="space-y-4">
+                <div className="space-y-3">
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">Full Name</label>
                     <input
