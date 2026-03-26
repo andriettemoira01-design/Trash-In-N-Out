@@ -1,0 +1,5 @@
+android/
+functions/
+node_modules/
+*.apk
+.git/
