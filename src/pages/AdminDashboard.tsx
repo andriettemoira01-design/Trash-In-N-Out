@@ -2,6 +2,7 @@
 
 import type React from "react"
 import { useState, useEffect, useRef } from "react"
+import { createPortal } from "react-dom"
 import {
   IonContent,
   IonPage,
@@ -1851,6 +1852,7 @@ const AdminDashboard: React.FC = () => {
         </div>
 
         {/* Modals */}
+        {createPortal(
         <AnimatePresence>
           {/* Price Modal */}
           {showPriceModal && currentPrice && (
@@ -2341,9 +2343,12 @@ const AdminDashboard: React.FC = () => {
               </motion.div>
             </motion.div>
           )}
-        </AnimatePresence>
+        </AnimatePresence>,
+        document.body
+        )}
 
         {/* Toast */}
+        {createPortal(
         <AnimatePresence>
           {showToast && (
             <motion.div
@@ -2367,7 +2372,9 @@ const AdminDashboard: React.FC = () => {
               </div>
             </motion.div>
           )}
-        </AnimatePresence>
+        </AnimatePresence>,
+        document.body
+        )}
 
         <div className="text-center py-4 mt-6 mb-4">
           <p className="text-xs text-gray-400">© {new Date().getFullYear()} Trash-In-N-Out. All rights reserved.</p>
