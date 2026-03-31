@@ -36,3 +36,4 @@ coverage/
 
 # Zip archives
 *.zip
+.vercel
