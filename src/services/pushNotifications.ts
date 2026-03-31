@@ -3,9 +3,8 @@ import { firestore, getFirebaseMessaging } from "../firebase"
 import { doc, updateDoc, collection, query, where, onSnapshot } from "firebase/firestore"
 import { getToken, onMessage } from "firebase/messaging"
 
-// VAPID key for FCM web push - generate from Firebase Console > Cloud Messaging > Web Push certificates
-// You MUST replace this with your own VAPID key from Firebase Console
-const VAPID_KEY = ""
+// VAPID key for FCM web push - from Firebase Console > Cloud Messaging > Web Push certificates
+const VAPID_KEY = "BBnWTjRJh1s56nbDRt_mRpfGIOZpz3fKToCL8_OPbBZbyeUVuJOE5il9KGUHE6iwV-98WERKfQ_MtxcNTWbISPs"
 
 // Request notification permission and register for push (both web + native)
 export const initPushNotifications = async (userId: string) => {

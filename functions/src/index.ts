@@ -1,4 +1,4 @@
-import * as functions from "firebase-functions"
+import { onDocumentCreated } from "firebase-functions/v2/firestore"
 import * as admin from "firebase-admin"
 
 admin.initializeApp()
@@ -8,9 +8,11 @@ const db = admin.firestore()
  * Sends a push notification (FCM) whenever a new notification document is created in Firestore.
  * This works even when the app is closed/inactive on both Android and Web.
  */
-export const sendPushOnNotification = functions.firestore
-  .document("notifications/{notificationId}")
-  .onCreate(async (snap) => {
+export const sendPushOnNotification = onDocumentCreated(
+  "notifications/{notificationId}",
+  async (event) => {
+    const snap = event.data
+    if (!snap) return
     const data = snap.data()
     if (!data) return
 
@@ -38,7 +40,7 @@ export const sendPushOnNotification = functions.firestore
         message: message || "You have a new notification",
         type: data.type || "system",
         relatedId: data.relatedId || "",
-        tag: `notification-${snap.id}`,
+        tag: `notification-${event.params.notificationId}`,
       },
       // Android-specific: high priority so it wakes the device
       android: {
@@ -65,7 +67,7 @@ export const sendPushOnNotification = functions.firestore
 
     try {
       await admin.messaging().send(payload)
-      console.log(`Push sent to user ${userId} for notification ${snap.id}`)
+      console.log(`Push sent to user ${userId} for notification ${event.params.notificationId}`)
     } catch (error: any) {
       console.error("Error sending push:", error)
       // If token is invalid, remove it
@@ -83,14 +85,16 @@ export const sendPushOnNotification = functions.firestore
  * Sends a push notification when a new chat message is added.
  * Directly listens to the messages subcollection under chatRooms.
  */
-export const sendPushOnChatMessage = functions.firestore
-  .document("chatRooms/{roomId}/messages/{messageId}")
-  .onCreate(async (snap, context) => {
+export const sendPushOnChatMessage = onDocumentCreated(
+  "chatRooms/{roomId}/messages/{messageId}",
+  async (event) => {
+    const snap = event.data
+    if (!snap) return
     const data = snap.data()
     if (!data) return
 
     const { senderId, senderName, text } = data
-    const roomId = context.params.roomId
+    const roomId = event.params.roomId
 
     // Get the chat room to find the other participant
     const roomDoc = await db.collection("chatRooms").doc(roomId).get()
